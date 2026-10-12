@@ -10,6 +10,11 @@ import (
 // Option configures optional Server dependencies.
 type Option func(*Server)
 
+// WithCookieSecure controls whether authentication cookies require HTTPS.
+func WithCookieSecure(secure bool) Option {
+	return func(s *Server) { s.cookieSecure = secure }
+}
+
 // WithAppealStore supplies the moderator appeal store.
 func WithAppealStore(store appeals.Store) Option {
 	return func(s *Server) { s.appealStore = store }

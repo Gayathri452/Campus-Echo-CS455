@@ -1,8 +1,8 @@
 import { useState } from "react";
 import AdministratorPage from "./pages/AdministratorPage";
 import AuthPage from "./pages/AuthPage";
+import StudentDashboardPage from "./pages/StudentDashboardPage";
 import ModeratorApp from "./pages/moderator/ModeratorApp";
-import StudentFeedbackPage from "./pages/StudentFeedbackPage";
 import { logout, type AuthSession } from "./services/auth";
 
 function App() {
@@ -12,7 +12,7 @@ function App() {
   async function handleLogout() {
     if (session) {
       try {
-        await logout(session.accessToken);
+        await logout(session.accessToken ?? "");
         setSession(null);
         setSessionError("");
       } catch (error: unknown) {
@@ -38,7 +38,7 @@ function App() {
     );
   }
   if (session.user.role === "student") {
-    return <StudentFeedbackPage session={session} onLogout={handleLogout} />;
+    return <StudentDashboardPage session={session} onLogout={handleLogout} />;
   }
   if (session.user.role === "administrator") {
     return <AdministratorPage session={session} onLogout={handleLogout} />;

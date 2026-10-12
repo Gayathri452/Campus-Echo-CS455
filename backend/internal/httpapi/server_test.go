@@ -23,6 +23,7 @@ type memoryAuthRepository struct {
 	passwords     map[string]string
 	sessions      map[string]string
 	sessionExpiry map[string]time.Time
+	otps          map[string]auth.OTPChallenge
 }
 
 func newMemoryAuthRepository() *memoryAuthRepository {
@@ -31,6 +32,7 @@ func newMemoryAuthRepository() *memoryAuthRepository {
 		passwords:     make(map[string]string),
 		sessions:      make(map[string]string),
 		sessionExpiry: make(map[string]time.Time),
+		otps:          make(map[string]auth.OTPChallenge),
 	}
 }
 
@@ -81,10 +83,14 @@ func (m *memoryAuthRepository) DeleteSession(_ context.Context, tokenHash string
 
 func (m *memoryStore) Create(_ context.Context, input feedback.CreateInput) (feedback.Feedback, error) {
 	m.created = feedback.Feedback{
-		ID:       "feedback-id",
-		CourseID: input.CourseID,
-		Content:  input.Content,
-		Status:   "submitted",
+		ID:            "feedback-id",
+		ReferenceCode: "CE-TEST123",
+		CourseID:      input.CourseID,
+		CourseTitle:   input.CourseTitle,
+		Category:      input.Category,
+		Rating:        input.Rating,
+		Content:       input.Content,
+		Status:        feedback.StatusSubmitted,
 	}
 	return m.created, nil
 }
@@ -92,13 +98,13 @@ func (m *memoryStore) Create(_ context.Context, input feedback.CreateInput) (fee
 func TestCreateFeedback(t *testing.T) {
 	store := &memoryStore{}
 	authService := auth.NewService(newMemoryAuthRepository())
-	session, err := authService.RegisterStudent(context.Background(), "student@college.edu", "long-secure-password")
+	session, err := authService.RegisterStudent(context.Background(), "student@iitk.ac.in", "long-secure-password")
 	if err != nil {
 		t.Fatal(err)
 	}
 	handler := NewServer(store, authService)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/feedback", strings.NewReader(
-		`{"courseId":" CS455 ","content":" A useful example "}`,
+		`{"courseId":" CS455 ","courseTitle":" Software Engineering ","category":"teaching","rating":4,"content":" A useful example "}`,
 	))
 	request.Header.Set("Authorization", "Bearer "+session.AccessToken)
 	response := httptest.NewRecorder()
@@ -108,7 +114,7 @@ func TestCreateFeedback(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body: %s", response.Code, http.StatusCreated, response.Body.String())
 	}
-	if store.created.CourseID != "CS455" || store.created.Content != "A useful example" {
+	if store.created.CourseID != "CS455" || store.created.CourseTitle != "Software Engineering" || store.created.Content != "A useful example" {
 		t.Fatalf("stored feedback was not normalized: %+v", store.created)
 	}
 
@@ -116,7 +122,7 @@ func TestCreateFeedback(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if result.ID != "feedback-id" || result.Status != "submitted" {
+	if result.ReferenceCode != "CE-TEST123" || result.Status != feedback.StatusSubmitted {
 		t.Fatalf("unexpected response: %+v", result)
 	}
 }
@@ -124,13 +130,13 @@ func TestCreateFeedback(t *testing.T) {
 func TestCreateFeedbackRejectsInvalidInput(t *testing.T) {
 	store := &memoryStore{}
 	authService := auth.NewService(newMemoryAuthRepository())
-	session, err := authService.RegisterStudent(context.Background(), "student@college.edu", "long-secure-password")
+	session, err := authService.RegisterStudent(context.Background(), "student@iitk.ac.in", "long-secure-password")
 	if err != nil {
 		t.Fatal(err)
 	}
 	handler := NewServer(store, authService)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/feedback", strings.NewReader(
-		`{"courseId":"CS455","content":" "}`,
+		`{"courseId":"CS455","courseTitle":"Software Engineering","category":"teaching","rating":4,"content":" "}`,
 	))
 	request.Header.Set("Authorization", "Bearer "+session.AccessToken)
 	response := httptest.NewRecorder()

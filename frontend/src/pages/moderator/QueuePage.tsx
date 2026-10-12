@@ -22,7 +22,7 @@ function QueuePage({ session, onTicketClaimed }: QueuePageProps) {
     let cancelled = false;
 
     setIsLoading(true);
-    void fetchQueue(session.accessToken, sort)
+    void fetchQueue(session.accessToken ?? "", sort)
       .then((result) => {
         if (!cancelled) {
           setTickets(result);
@@ -57,7 +57,7 @@ function QueuePage({ session, onTicketClaimed }: QueuePageProps) {
     setIsClaiming(true);
     setClaimError("");
     try {
-      await claimTicket(session.accessToken, ticketId);
+      await claimTicket(session.accessToken ?? "", ticketId);
       onTicketClaimed(ticketId);
     } catch (error: unknown) {
       if (error instanceof ApiError && error.status === 409) {

@@ -65,7 +65,7 @@ function TicketDetailPage({ session, ticketId, onDone }: TicketDetailPageProps) 
   useEffect(() => {
     let cancelled = false;
 
-    fetchTicket(session.accessToken, ticketId)
+    fetchTicket(session.accessToken ?? "", ticketId)
       .then((result) => {
         if (!cancelled) setTicket(result);
       })
@@ -142,7 +142,7 @@ function TicketDetailPage({ session, ticketId, onDone }: TicketDetailPageProps) 
           disabled={isSubmitting}
           onClick={() =>
             void finishAction(
-              () => releaseTicket(session.accessToken, ticketId),
+              () => releaseTicket(session.accessToken ?? "", ticketId),
               "Appeal sent back to the queue",
             )
           }
@@ -163,7 +163,7 @@ function TicketDetailPage({ session, ticketId, onDone }: TicketDetailPageProps) 
           disabled={isSubmitting}
           onClick={() =>
             void finishAction(
-              () => restoreTicket(session.accessToken, ticketId),
+              () => restoreTicket(session.accessToken ?? "", ticketId),
               "Review published",
             )
           }
@@ -179,7 +179,7 @@ function TicketDetailPage({ session, ticketId, onDone }: TicketDetailPageProps) 
           onCancel={() => setIsDeleteOpen(false)}
           onSubmit={(comment) =>
             void finishAction(
-              () => deleteTicket(session.accessToken, ticketId, comment),
+              () => deleteTicket(session.accessToken ?? "", ticketId, comment),
               "Review deleted",
             )
           }

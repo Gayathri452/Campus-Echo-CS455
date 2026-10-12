@@ -3,40 +3,116 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Kishore200524/CS455-Project/backend/internal/auth"
 )
 
+type memoryEmailService struct {
+	email string
+	code  string
+}
+
+func (m *memoryEmailService) SendOTP(_ context.Context, email, code string) error {
+	m.email = email
+	m.code = code
+	return nil
+}
+
+func (m *memoryAuthRepository) CreateStudent(_ context.Context, email, passwordHash string) (auth.User, error) {
+	if user, exists := m.users[email]; exists {
+		return user, nil
+	}
+	user := auth.User{ID: email, Email: email, Role: auth.RoleStudent, CreatedAt: time.Now().UTC()}
+	m.users[email] = user
+	m.passwords[email] = passwordHash
+	return user, nil
+}
+
+func (m *memoryAuthRepository) FindOTP(_ context.Context, email string) (auth.OTPChallenge, error) {
+	challenge, exists := m.otps[email]
+	if !exists {
+		return auth.OTPChallenge{}, auth.ErrInvalidOTP
+	}
+	return challenge, nil
+}
+
+func (m *memoryAuthRepository) InvalidateOTP(_ context.Context, email string) error {
+	delete(m.otps, email)
+	return nil
+}
+
+func (m *memoryAuthRepository) CreateOTP(_ context.Context, challenge auth.OTPChallenge) error {
+	m.otps[challenge.Email] = challenge
+	return nil
+}
+
+func (m *memoryAuthRepository) IncrementOTPAttempts(_ context.Context, email string) (int, error) {
+	challenge, exists := m.otps[email]
+	if !exists {
+		return 0, auth.ErrInvalidOTP
+	}
+	challenge.Attempts++
+	m.otps[email] = challenge
+	return challenge.Attempts, nil
+}
+
+func (m *memoryAuthRepository) DeleteOTP(_ context.Context, email string) error {
+	delete(m.otps, email)
+	return nil
+}
+
+func (m *memoryAuthRepository) DeleteModerator(_ context.Context, email string) error {
+	user, exists := m.users[email]
+	if !exists || user.Role != auth.RoleModerator {
+		return auth.ErrModeratorNotFound
+	}
+	delete(m.users, email)
+	delete(m.passwords, email)
+	return nil
+}
+
 func TestRegistrationLoginAndAuthenticatedIdentity(t *testing.T) {
-	service := auth.NewService(newMemoryAuthRepository())
+	repository := newMemoryAuthRepository()
+	mailer := &memoryEmailService{}
+	service := auth.NewService(repository, mailer)
 	handler := NewServer(nil, service)
 
-	register := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", strings.NewReader(
-		`{"email":"Student@College.edu","password":"long-secure-password"}`,
+	requestOTP := httptest.NewRequest(http.MethodPost, "/api/auth/request-otp", strings.NewReader(
+		`{"email":"Student@iitk.ac.in","password":"long-secure-password","confirmPassword":"long-secure-password"}`,
 	))
-	registerResponse := httptest.NewRecorder()
-	handler.ServeHTTP(registerResponse, register)
-	if registerResponse.Code != http.StatusCreated {
-		t.Fatalf("registration status = %d, want %d: %s", registerResponse.Code, http.StatusCreated, registerResponse.Body.String())
+	requestOTPResponse := httptest.NewRecorder()
+	handler.ServeHTTP(requestOTPResponse, requestOTP)
+	if requestOTPResponse.Code != http.StatusAccepted {
+		t.Fatalf("OTP request status = %d, want %d: %s", requestOTPResponse.Code, http.StatusAccepted, requestOTPResponse.Body.String())
 	}
 
-	var session auth.Session
-	if err := json.NewDecoder(registerResponse.Body).Decode(&session); err != nil {
-		t.Fatalf("decode registration response: %v", err)
+	verify := httptest.NewRequest(http.MethodPost, "/api/auth/verify-otp", strings.NewReader(
+		`{"email":"student@iitk.ac.in","code":"`+mailer.code+`"}`,
+	))
+	verifyResponse := httptest.NewRecorder()
+	handler.ServeHTTP(verifyResponse, verify)
+	if verifyResponse.Code != http.StatusOK {
+		t.Fatalf("verification status = %d, want %d: %s", verifyResponse.Code, http.StatusOK, verifyResponse.Body.String())
 	}
-	if session.User.Role != auth.RoleStudent || session.User.Email != "student@college.edu" {
-		t.Fatalf("unexpected registered user: %+v", session.User)
+	var user auth.User
+	if err := json.NewDecoder(verifyResponse.Body).Decode(&user); err != nil {
+		t.Fatalf("decode verification response: %v", err)
 	}
-	if strings.Contains(registerResponse.Body.String(), "password") {
+	if user.Role != auth.RoleStudent || user.Email != "student@iitk.ac.in" {
+		t.Fatalf("unexpected verified user: %+v", user)
+	}
+	if strings.Contains(verifyResponse.Body.String(), "password") {
 		t.Fatal("authentication response must not include password data")
 	}
 
 	me := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
-	me.Header.Set("Authorization", "Bearer "+session.AccessToken)
+	me.Header.Set("Cookie", verifyResponse.Header().Get("Set-Cookie"))
 	meResponse := httptest.NewRecorder()
 	handler.ServeHTTP(meResponse, me)
 	if meResponse.Code != http.StatusOK {
@@ -44,7 +120,7 @@ func TestRegistrationLoginAndAuthenticatedIdentity(t *testing.T) {
 	}
 
 	login := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(
-		`{"email":"student@college.edu","password":"long-secure-password"}`,
+		`{"email":"student@iitk.ac.in","password":"long-secure-password"}`,
 	))
 	loginResponse := httptest.NewRecorder()
 	handler.ServeHTTP(loginResponse, login)
@@ -55,7 +131,7 @@ func TestRegistrationLoginAndAuthenticatedIdentity(t *testing.T) {
 
 func TestProtectedRoutesRequireRole(t *testing.T) {
 	service := auth.NewService(newMemoryAuthRepository())
-	studentSession, err := service.RegisterStudent(context.Background(), "student@college.edu", "long-secure-password")
+	studentSession, err := service.RegisterStudent(context.Background(), "student@iitk.ac.in", "long-secure-password")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,8 +151,8 @@ func TestProtectedRoutesRequireRole(t *testing.T) {
 	))
 	roleEscalationResponse := httptest.NewRecorder()
 	handler.ServeHTTP(roleEscalationResponse, roleEscalation)
-	if roleEscalationResponse.Code != http.StatusBadRequest {
-		t.Fatalf("role escalation status = %d, want %d", roleEscalationResponse.Code, http.StatusBadRequest)
+	if roleEscalationResponse.Code != http.StatusNotFound {
+		t.Fatalf("direct registration status = %d, want %d", roleEscalationResponse.Code, http.StatusNotFound)
 	}
 
 	studentRequest := httptest.NewRequest(http.MethodPost, "/api/v1/admin/moderators", strings.NewReader(
@@ -87,6 +163,36 @@ func TestProtectedRoutesRequireRole(t *testing.T) {
 	handler.ServeHTTP(studentResponse, studentRequest)
 	if studentResponse.Code != http.StatusForbidden {
 		t.Fatalf("student moderator-provision status = %d, want %d", studentResponse.Code, http.StatusForbidden)
+	}
+}
+
+func TestRoleSpecificLoginRejectsWrongRole(t *testing.T) {
+	repository := newMemoryAuthRepository()
+	service := auth.NewService(repository)
+	if _, err := service.RegisterStudent(context.Background(), "student@iitk.ac.in", "studentpass"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ProvisionModerator(context.Background(), "moderator@example.com", "modpass1"); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(nil, service)
+
+	wrongRole := httptest.NewRequest(http.MethodPost, "/api/auth/student/login", strings.NewReader(
+		`{"email":"moderator@example.com","password":"modpass1"}`,
+	))
+	wrongRoleResponse := httptest.NewRecorder()
+	handler.ServeHTTP(wrongRoleResponse, wrongRole)
+	if wrongRoleResponse.Code != http.StatusForbidden {
+		t.Fatalf("wrong-role status = %d, want %d", wrongRoleResponse.Code, http.StatusForbidden)
+	}
+
+	correctRole := httptest.NewRequest(http.MethodPost, "/api/auth/moderator/login", strings.NewReader(
+		`{"email":"moderator@example.com","password":"modpass1"}`,
+	))
+	correctRoleResponse := httptest.NewRecorder()
+	handler.ServeHTTP(correctRoleResponse, correctRole)
+	if correctRoleResponse.Code != http.StatusOK {
+		t.Fatalf("correct-role status = %d, want %d: %s", correctRoleResponse.Code, http.StatusOK, correctRoleResponse.Body.String())
 	}
 }
 
@@ -131,5 +237,33 @@ func TestAdministratorCanProvisionModerator(t *testing.T) {
 	handler.ServeHTTP(feedbackResponse, feedbackRequest)
 	if feedbackResponse.Code != http.StatusForbidden {
 		t.Fatalf("moderator feedback status = %d, want %d", feedbackResponse.Code, http.StatusForbidden)
+	}
+}
+
+func TestOnlyAdministratorCanRemoveModerator(t *testing.T) {
+	repository := newMemoryAuthRepository()
+	service := auth.NewService(repository)
+	if _, err := service.CreateAdministrator(context.Background(), "admin@example.com", "adminpass"); err != nil {
+		t.Fatal(err)
+	}
+	moderator, err := service.ProvisionModerator(context.Background(), "moderator@example.com", "modpass1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminSession, err := service.Login(context.Background(), "admin@example.com", "adminpass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(nil, service)
+
+	request := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/moderators/moderator@example.com", nil)
+	request.Header.Set("Authorization", "Bearer "+adminSession.AccessToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("remove status = %d, want %d: %s", response.Code, http.StatusNoContent, response.Body.String())
+	}
+	if _, err := service.Login(context.Background(), moderator.Email, "modpass1"); !errors.Is(err, auth.ErrInvalidCredentials) {
+		t.Fatalf("removed moderator login error = %v, want ErrInvalidCredentials", err)
 	}
 }

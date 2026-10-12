@@ -12,28 +12,25 @@ func TestValidate(t *testing.T) {
 		input   CreateInput
 		wantErr error
 	}{
-		{
-			name:  "valid submission",
-			input: CreateInput{CourseID: "CS455", Content: "Helpful examples"},
-		},
+		{name: "valid submission", input: CreateInput{CourseID: "CS455", CourseTitle: "Software Engineering", Category: "teaching", Rating: 4, Content: "Helpful examples"}},
 		{
 			name:    "empty course",
-			input:   CreateInput{Content: "Helpful examples"},
+			input:   CreateInput{CourseTitle: "Software Engineering", Category: "teaching", Rating: 4, Content: "Helpful examples"},
 			wantErr: ErrInvalidCourseID,
 		},
 		{
 			name:    "course too long",
-			input:   CreateInput{CourseID: strings.Repeat("c", 121), Content: "Helpful examples"},
+			input:   CreateInput{CourseID: strings.Repeat("c", 121), CourseTitle: "Software Engineering", Category: "teaching", Rating: 4, Content: "Helpful examples"},
 			wantErr: ErrInvalidCourseID,
 		},
 		{
 			name:    "empty content",
-			input:   CreateInput{CourseID: "CS455", Content: " \n "},
+			input:   CreateInput{CourseID: "CS455", CourseTitle: "Software Engineering", Category: "teaching", Rating: 4, Content: " \n "},
 			wantErr: ErrInvalidContent,
 		},
 		{
 			name:    "content too long",
-			input:   CreateInput{CourseID: "CS455", Content: strings.Repeat("c", MaxContentLength+1)},
+			input:   CreateInput{CourseID: "CS455", CourseTitle: "Software Engineering", Category: "teaching", Rating: 4, Content: strings.Repeat("c", MaxContentLength+1)},
 			wantErr: ErrInvalidContent,
 		},
 	}

@@ -40,7 +40,7 @@ Prerequisites: Go 1.22+, Node.js 18+, npm, and a MongoDB server.
    ```
 
    Enter the administrator email and password when prompted; password entry is
-   hidden. The password must be at least 12 characters. This command only
+   hidden. The password must be at least 6 characters. This command only
    creates an administrator and does not reset or reveal existing passwords.
 
 3. In one terminal, start the API from the repository root:
@@ -70,16 +70,30 @@ Prerequisites: Go 1.22+, Node.js 18+, npm, and a MongoDB server.
 ## Current starter API
 
 - `GET /api/v1/health` — liveness check
-- `POST /api/v1/auth/register` — register as a student with `{ "email", "password" }`
+- `POST /api/auth/request-otp` — validate an IITK email and password registration request, then send an OTP
+- `POST /api/auth/verify-otp` — verify the OTP, create the student account, and establish a session
+- `POST /api/auth/student/login` — student-only password login
+- `POST /api/auth/admin/login` — administrator-only password login
+- `POST /api/auth/moderator/login` — moderator-only password login
 - `POST /api/v1/auth/login` — log in; returns a 12-hour bearer session
 - `POST /api/v1/auth/logout` — revoke the bearer session
 - `GET /api/v1/auth/me` — return the signed-in account
 - `POST /api/v1/admin/moderators` — administrator-only moderator provisioning
-- `POST /api/v1/feedback` — student-only starter endpoint accepting:
+- `DELETE /api/v1/admin/moderators/{email}` — administrator-only moderator removal
+- `POST /api/v1/feedback` — student-only anonymous review submission
+- `GET /api/v1/feedback/explore` — student-only published review search and filters
+- `GET /api/v1/feedback/ratings` — student-only published course rating summaries
+- `GET /api/v1/feedback/status/{reference}` — student-only reference status lookup
+- `POST /api/v1/feedback/status/{reference}/appeal` — appeal a flagged or rejected review
+
+Review submissions accept:
 
   ```json
   {
     "courseId": "CS455",
+      "courseTitle": "Software Engineering",
+      "category": "teaching",
+      "rating": 4,
     "content": "The weekly examples helped me understand the material."
   }
   ```

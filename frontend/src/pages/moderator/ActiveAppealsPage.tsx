@@ -18,7 +18,7 @@ function ActiveAppealsPage({ session, onOpenTicket }: ActiveAppealsPageProps) {
     let cancelled = false;
 
     setIsLoading(true);
-    void fetchMyTickets(session.accessToken)
+    void fetchMyTickets(session.accessToken ?? "")
       .then((result) => {
         if (!cancelled) {
           setTickets(result);

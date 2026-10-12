@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/Kishore200524/CS455-Project/backend/internal/auth"
@@ -18,6 +19,7 @@ type Mongo struct {
 	feedbackCollection *mongo.Collection
 	userCollection     *mongo.Collection
 	sessionCollection  *mongo.Collection
+	otpCollection      *mongo.Collection
 	appealCollection   *mongo.Collection
 }
 
@@ -42,6 +44,7 @@ func Connect(ctx context.Context, uri, databaseName string) (*Mongo, error) {
 		feedbackCollection: database.Collection("feedback"),
 		userCollection:     database.Collection("users"),
 		sessionCollection:  database.Collection("sessions"),
+		otpCollection:      database.Collection("otp_challenges"),
 		appealCollection:   database.Collection("appeals"),
 	}
 	if err := store.ensureAuthIndexes(ctx); err != nil {
@@ -71,6 +74,74 @@ func (m *Mongo) ensureAuthIndexes(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create session expiry index: %w", err)
 	}
+	_, err = m.otpCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "expiresAt", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(0),
+	})
+	if err != nil {
+		return fmt.Errorf("create OTP expiry index: %w", err)
+	}
+	_, err = m.feedbackCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "referenceCode", Value: 1}},
+		Options: options.Index().SetUnique(true).SetPartialFilterExpression(bson.D{
+			{Key: "referenceCode", Value: bson.D{{Key: "$type", Value: "string"}}},
+		}),
+	})
+	if err != nil {
+		return fmt.Errorf("create feedback reference index: %w", err)
+	}
+	_, err = m.appealCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "referenceCode", Value: 1}},
+		Options: options.Index().SetUnique(true).SetPartialFilterExpression(bson.D{
+			{Key: "referenceCode", Value: bson.D{{Key: "$type", Value: "string"}}},
+		}),
+	})
+	if err != nil {
+		return fmt.Errorf("create appeal reference index: %w", err)
+	}
+	return nil
+}
+
+func (m *Mongo) CreateStudent(ctx context.Context, email, passwordHash string) (auth.User, error) {
+	now := time.Now().UTC()
+	result, err := m.userCollection.InsertOne(ctx, bson.M{
+		"email":        email,
+		"passwordHash": passwordHash,
+		"role":         auth.RoleStudent,
+		"createdAt":    now,
+	})
+	if mongo.IsDuplicateKeyError(err) {
+		user, _, findErr := m.FindUserByEmail(ctx, email)
+		return user, findErr
+	}
+	if err != nil {
+		return auth.User{}, fmt.Errorf("insert student: %w", err)
+	}
+	id, ok := result.InsertedID.(primitive.ObjectID)
+	if !ok {
+		return auth.User{}, fmt.Errorf("MongoDB returned unexpected student ID type %T", result.InsertedID)
+	}
+	return auth.User{ID: id.Hex(), Email: email, Role: auth.RoleStudent, CreatedAt: now}, nil
+}
+
+func (m *Mongo) SetStudentPassword(ctx context.Context, email, passwordHash string) error {
+	result, err := m.userCollection.UpdateOne(ctx,
+		bson.M{
+			"email": email,
+			"role":  auth.RoleStudent,
+			"$or": []bson.M{
+				{"passwordHash": bson.M{"$exists": false}},
+				{"passwordHash": ""},
+			},
+		},
+		bson.M{"$set": bson.M{"passwordHash": passwordHash}},
+	)
+	if err != nil {
+		return fmt.Errorf("set student password: %w", err)
+	}
+	if result.MatchedCount == 0 {
+		return auth.ErrInvalidCredentials
+	}
 	return nil
 }
 
@@ -95,6 +166,17 @@ func (m *Mongo) CreateUser(ctx context.Context, email, passwordHash, role string
 		return auth.User{}, fmt.Errorf("MongoDB returned unexpected user ID type %T", result.InsertedID)
 	}
 	return auth.User{ID: id.Hex(), Email: email, Role: role, CreatedAt: now}, nil
+}
+
+func (m *Mongo) DeleteModerator(ctx context.Context, email string) error {
+	result, err := m.userCollection.DeleteOne(ctx, bson.M{"email": email, "role": auth.RoleModerator})
+	if err != nil {
+		return fmt.Errorf("delete moderator: %w", err)
+	}
+	if result.DeletedCount == 0 {
+		return auth.ErrModeratorNotFound
+	}
+	return nil
 }
 
 func (m *Mongo) FindUserByEmail(ctx context.Context, email string) (auth.User, string, error) {
@@ -181,13 +263,75 @@ func (m *Mongo) DeleteSession(ctx context.Context, tokenHash string) error {
 	return nil
 }
 
+func (m *Mongo) FindOTP(ctx context.Context, email string) (auth.OTPChallenge, error) {
+	var result auth.OTPChallenge
+	if err := m.otpCollection.FindOne(ctx, bson.M{"_id": email}).Decode(&result); err != nil {
+		if err == mongo.ErrNoDocuments {
+			return auth.OTPChallenge{}, auth.ErrInvalidOTP
+		}
+		return auth.OTPChallenge{}, fmt.Errorf("find OTP challenge: %w", err)
+	}
+	return result, nil
+}
+
+func (m *Mongo) InvalidateOTP(ctx context.Context, email string) error {
+	_, err := m.otpCollection.DeleteOne(ctx, bson.M{"_id": email})
+	if err != nil {
+		return fmt.Errorf("invalidate OTP challenge: %w", err)
+	}
+	return nil
+}
+
+func (m *Mongo) CreateOTP(ctx context.Context, challenge auth.OTPChallenge) error {
+	_, err := m.otpCollection.InsertOne(ctx, bson.M{
+		"_id":         challenge.Email,
+		"email":       challenge.Email,
+		"otpHash":     challenge.OTPHash,
+		"expiresAt":   challenge.ExpiresAt,
+		"attempts":    challenge.Attempts,
+		"requestedAt": challenge.RequestedAt,
+		"resendCount": challenge.ResendCount,
+	})
+	if err != nil {
+		return fmt.Errorf("insert OTP challenge: %w", err)
+	}
+	return nil
+}
+
+func (m *Mongo) IncrementOTPAttempts(ctx context.Context, email string) (int, error) {
+	result := m.otpCollection.FindOneAndUpdate(ctx, bson.M{"_id": email}, bson.M{"$inc": bson.M{"attempts": 1}}, options.FindOneAndUpdate().SetReturnDocument(options.After))
+	var challenge struct {
+		Attempts int `bson:"attempts"`
+	}
+	if err := result.Decode(&challenge); err != nil {
+		return 0, fmt.Errorf("increment OTP attempts: %w", err)
+	}
+	return challenge.Attempts, nil
+}
+
+func (m *Mongo) DeleteOTP(ctx context.Context, email string) error {
+	_, err := m.otpCollection.DeleteOne(ctx, bson.M{"_id": email})
+	if err != nil {
+		return fmt.Errorf("delete OTP challenge: %w", err)
+	}
+	return nil
+}
+
 func (m *Mongo) Create(ctx context.Context, input feedback.CreateInput) (feedback.Feedback, error) {
+	referenceCode, err := feedback.GenerateReferenceCode()
+	if err != nil {
+		return feedback.Feedback{}, err
+	}
 	now := time.Now().UTC()
 	document := bson.M{
-		"courseId":  input.CourseID,
-		"content":   input.Content,
-		"status":    "submitted",
-		"createdAt": now,
+		"referenceCode": referenceCode,
+		"courseId":      input.CourseID,
+		"courseTitle":   input.CourseTitle,
+		"category":      input.Category,
+		"rating":        input.Rating,
+		"content":       input.Content,
+		"status":        feedback.StatusSubmitted,
+		"createdAt":     now,
 	}
 
 	result, err := m.feedbackCollection.InsertOne(ctx, document)
@@ -201,12 +345,115 @@ func (m *Mongo) Create(ctx context.Context, input feedback.CreateInput) (feedbac
 	}
 
 	return feedback.Feedback{
-		ID:        id.Hex(),
-		CourseID:  input.CourseID,
-		Content:   input.Content,
-		Status:    "submitted",
-		CreatedAt: now,
+		ID:            id.Hex(),
+		ReferenceCode: referenceCode,
+		CourseID:      input.CourseID,
+		CourseTitle:   input.CourseTitle,
+		Category:      input.Category,
+		Rating:        input.Rating,
+		Content:       input.Content,
+		Status:        feedback.StatusSubmitted,
+		CreatedAt:     now,
 	}, nil
+}
+
+func (m *Mongo) Explore(ctx context.Context, filters feedback.ExploreFilters) ([]feedback.Feedback, error) {
+	query := bson.M{"status": feedback.StatusPublished}
+	if filters.Category != "" {
+		query["category"] = filters.Category
+	}
+	if filters.CourseID != "" {
+		query["courseId"] = filters.CourseID
+	}
+	if filters.Rating >= feedback.MinRating && filters.Rating <= feedback.MaxRating {
+		query["rating"] = filters.Rating
+	}
+	if filters.Search != "" {
+		pattern := regexp.QuoteMeta(filters.Search)
+		query["$or"] = []bson.M{
+			{"courseId": primitive.Regex{Pattern: pattern, Options: "i"}},
+			{"courseTitle": primitive.Regex{Pattern: pattern, Options: "i"}},
+			{"category": primitive.Regex{Pattern: pattern, Options: "i"}},
+			{"content": primitive.Regex{Pattern: pattern, Options: "i"}},
+		}
+	}
+	options := options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}}).SetLimit(100)
+	cursor, err := m.feedbackCollection.Find(ctx, query, options)
+	if err != nil {
+		return nil, fmt.Errorf("find published feedback: %w", err)
+	}
+	defer cursor.Close(ctx)
+	var results []feedback.Feedback
+	if err := cursor.All(ctx, &results); err != nil {
+		return nil, fmt.Errorf("decode published feedback: %w", err)
+	}
+	return results, nil
+}
+
+func (m *Mongo) CourseRatings(ctx context.Context, courseID string) ([]feedback.CourseRating, error) {
+	match := bson.M{"status": feedback.StatusPublished}
+	if courseID != "" {
+		match["courseId"] = courseID
+	}
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: match}},
+		{{Key: "$group", Value: bson.M{
+			"_id":           bson.M{"courseId": "$courseId", "courseTitle": "$courseTitle"},
+			"reviewCount":   bson.M{"$sum": 1},
+			"averageRating": bson.M{"$avg": "$rating"},
+		}}},
+		{{Key: "$sort", Value: bson.D{{Key: "reviewCount", Value: -1}, {Key: "_id.courseId", Value: 1}}}},
+	}
+	cursor, err := m.feedbackCollection.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate course ratings: %w", err)
+	}
+	defer cursor.Close(ctx)
+	var rows []struct {
+		ID struct {
+			CourseID    string `bson:"courseId"`
+			CourseTitle string `bson:"courseTitle"`
+		} `bson:"_id"`
+		ReviewCount   int64   `bson:"reviewCount"`
+		AverageRating float64 `bson:"averageRating"`
+	}
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode course ratings: %w", err)
+	}
+	results := make([]feedback.CourseRating, 0, len(rows))
+	for _, row := range rows {
+		results = append(results, feedback.CourseRating{
+			CourseID: row.ID.CourseID, CourseTitle: row.ID.CourseTitle,
+			ReviewCount: row.ReviewCount, AverageRating: row.AverageRating,
+		})
+	}
+	return results, nil
+}
+
+func (m *Mongo) FindByReference(ctx context.Context, referenceCode string) (feedback.Feedback, error) {
+	var result feedback.Feedback
+	if err := m.feedbackCollection.FindOne(ctx, bson.M{"referenceCode": referenceCode}).Decode(&result); err != nil {
+		if err == mongo.ErrNoDocuments {
+			return feedback.Feedback{}, feedback.ErrReviewNotFound
+		}
+		return feedback.Feedback{}, fmt.Errorf("find feedback by reference: %w", err)
+	}
+	return result, nil
+}
+
+func (m *Mongo) CreateAppeal(ctx context.Context, referenceCode, reason string) (feedback.Appeal, error) {
+	review, err := m.FindByReference(ctx, referenceCode)
+	if err != nil {
+		return feedback.Appeal{}, err
+	}
+	if review.Status != feedback.StatusFlagged && review.Status != feedback.StatusRejected {
+		return feedback.Appeal{}, feedback.ErrAppealNotEligible
+	}
+	appeal := feedback.Appeal{ReferenceCode: referenceCode, Reason: reason, Status: "pending", CreatedAt: time.Now().UTC()}
+	if _, err := m.appealCollection.InsertOne(ctx, appeal); err != nil {
+		return feedback.Appeal{}, fmt.Errorf("create appeal: %w", err)
+	}
+	return appeal, nil
 }
 
 func (m *Mongo) Disconnect(ctx context.Context) error {
