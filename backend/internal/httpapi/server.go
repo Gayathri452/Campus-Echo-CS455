@@ -45,6 +45,7 @@ func NewServer(feedbackStore feedback.Store, authService *auth.Service, options 
 	mux.Handle("POST /api/v1/feedback/status/{reference}/appeal", server.requireRole(auth.RoleStudent, http.HandlerFunc(server.createAppeal)))
 	server.registerModeratorRoutes(mux)
 	server.registerCourseRoutes(mux)
+	server.registerAnnouncementRoutes(mux)
 	return mux
 }
 

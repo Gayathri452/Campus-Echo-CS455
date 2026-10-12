@@ -71,6 +71,18 @@ type courseTestTokens struct {
 
 func newCourseTestServer(t *testing.T, store *courseFakeStore) (http.Handler, courseTestTokens) {
 	t.Helper()
+	var feedbackStore feedback.Store
+	if store != nil {
+		feedbackStore = store
+	}
+	return newRoleTestServer(t, feedbackStore)
+}
+
+// newRoleTestServer returns a server over feedbackStore plus administrator,
+// moderator and student tokens. A nil feedbackStore gives a server whose store
+// supports none of the optional features.
+func newRoleTestServer(t *testing.T, feedbackStore feedback.Store) (http.Handler, courseTestTokens) {
+	t.Helper()
 	ctx := context.Background()
 	service := auth.NewService(newMemoryAuthRepository())
 	const password = "long-secure-password"
@@ -94,10 +106,6 @@ func newCourseTestServer(t *testing.T, store *courseFakeStore) (http.Handler, co
 		t.Fatalf("register student: %v", err)
 	}
 
-	var feedbackStore feedback.Store
-	if store != nil {
-		feedbackStore = store
-	}
 	return NewServer(feedbackStore, service), courseTestTokens{
 		admin: admin.AccessToken, moderator: moderator.AccessToken, student: student.AccessToken,
 	}
