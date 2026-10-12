@@ -18,6 +18,7 @@ type Mongo struct {
 	feedbackCollection *mongo.Collection
 	userCollection     *mongo.Collection
 	sessionCollection  *mongo.Collection
+	appealCollection   *mongo.Collection
 }
 
 func Connect(ctx context.Context, uri, databaseName string) (*Mongo, error) {
@@ -41,6 +42,7 @@ func Connect(ctx context.Context, uri, databaseName string) (*Mongo, error) {
 		feedbackCollection: database.Collection("feedback"),
 		userCollection:     database.Collection("users"),
 		sessionCollection:  database.Collection("sessions"),
+		appealCollection:   database.Collection("appeals"),
 	}
 	if err := store.ensureAuthIndexes(ctx); err != nil {
 		disconnectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Kishore200524/CS455-Project/backend/internal/appeals"
 	"github.com/Kishore200524/CS455-Project/backend/internal/auth"
 	"github.com/Kishore200524/CS455-Project/backend/internal/config"
 	"github.com/Kishore200524/CS455-Project/backend/internal/database"
@@ -42,9 +43,11 @@ func run() error {
 		}
 	}()
 
+	go appeals.RunExpiryWorker(ctx, store, appeals.DefaultSweepInterval)
+
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           httpapi.NewServer(store, auth.NewService(store)),
+		Handler:           httpapi.NewServer(store, auth.NewService(store), httpapi.WithAppealStore(store)),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	serverErrors := make(chan error, 1)
