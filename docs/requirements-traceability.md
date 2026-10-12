@@ -12,18 +12,18 @@ means the code should not be presented as satisfying that requirement.
 | ID | Required behavior | Starter status |
 | --- | --- | --- |
 | FR-1 | Student sign-up and admin-provisioned moderator accounts issue role-based session tokens. | Implemented for local starter: student signup, administrator CLI bootstrap, administrator-only moderator provisioning, and bearer sessions. College enrollment/email-domain verification is not yet integrated. |
-| FR-2 | Login supports Student and Moderator roles; moderator features require moderator authorization. | Partial: all account roles can log in; backend enforces student-only feedback submission and administrator-only moderator provisioning. Moderator queue features are not implemented. |
-| FR-3 | Submit a course review with a 1–5 rating and text; persist no student identity and return an anonymous reference code. | Partial: accepts course ID and text, persists no identity; missing rating, instructor selection, reference code, and specified acceptance response. |
+| FR-2 | Login supports Student and Moderator roles; moderator features require moderator authorization. | Partial: all account roles can log in; moderator queue and resolution routes enforce moderator authorization. |
+| FR-3 | Submit a course review with a 1–5 rating and text; persist no student identity and return an anonymous reference code. | Partial: accepts course details, rating, and text, persists no identity, and returns a reference code; instructor selection and the specified acceptance response are missing. |
 | FR-4 | Show a course's average rating and published reviews only. | Not implemented |
-| FR-5 | Look up review status and flag reason by anonymous reference code. | Not implemented |
-| FR-6 | Asynchronously classify each review; publish or flag it and record the reason. | Not implemented: records `submitted` directly; no worker or classifier. |
+| FR-5 | Look up review status and flag reason by anonymous reference code. | Implemented for reference-code lookup, flag reason, appeal status, and resolution note. |
+| FR-6 | Asynchronously classify each review; publish or flag it and record the reason. | Development mode only: every submission is flagged with a fixed reason; no worker or classifier is connected. |
 | FR-7 | Detect near-duplicate reviews for the same course as spam. | Not implemented |
 | FR-8 | Flag a course batch for brigading only when velocity is over 15 reviews per 10 minutes **and** average semantic similarity is over 75%; count only reviews longer than five words. | Not implemented |
-| FR-9 | Allow one appeal per flagged review, with a short explanation, creating a moderation ticket. | Not implemented |
-| FR-10 | Show moderators unclaimed appeal tickets oldest first. | Not implemented |
-| FR-11 | Atomically claim a ticket so exactly one moderator owns it; concurrent losing claims receive a conflict. | Not implemented |
-| FR-12 | Return a claimed ticket to the queue when released or unresolved after 30 minutes. | Not implemented |
-| FR-13 | Only the owning moderator can resolve a ticket by restoring/publishing or permanently deleting its review. | Not implemented |
+| FR-9 | Allow one appeal per flagged review, with a short explanation, creating a moderation ticket. | Implemented: a unique appeal reference enforces one ticket per review. |
+| FR-10 | Show moderators unclaimed appeal tickets oldest first. | Implemented: only appealed feedback creates a claimable ticket. |
+| FR-11 | Atomically claim a ticket so exactly one moderator owns it; concurrent losing claims receive a conflict. | Implemented with an atomic MongoDB claim update. |
+| FR-12 | Return a claimed ticket to the queue when released or unresolved after 30 minutes. | Implemented with release and expired-lock handling. |
+| FR-13 | Only the owning moderator can resolve a ticket by restoring/publishing or permanently deleting its review. | Implemented with moderator role and active-lock checks. |
 
 The review lifecycle is `Submitted → Published / Flagged → Under Appeal →
 Locked → Restored / Deleted`, with a released or expired lock returning to

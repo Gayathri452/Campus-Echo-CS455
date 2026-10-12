@@ -18,6 +18,9 @@ export interface FeedbackInput {
 export interface FeedbackResponse extends FeedbackInput {
   referenceCode: string;
   status: string;
+  flagReason?: string;
+  appealStatus?: string;
+  appealResolutionComment?: string;
   createdAt: string;
   publishedAt?: string;
 }
@@ -74,6 +77,9 @@ function isFeedback(value: unknown): value is FeedbackResponse {
     typeof value.rating === "number" &&
     typeof value.content === "string" &&
     typeof value.status === "string" &&
+    (value.flagReason === undefined || typeof value.flagReason === "string") &&
+    (value.appealStatus === undefined || typeof value.appealStatus === "string") &&
+    (value.appealResolutionComment === undefined || typeof value.appealResolutionComment === "string") &&
     typeof value.createdAt === "string";
 }
 

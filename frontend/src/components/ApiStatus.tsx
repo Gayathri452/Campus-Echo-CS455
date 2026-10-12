@@ -18,7 +18,7 @@ const statusLabels: Record<ApiHealth, string> = {
 
 function ApiStatus({ health }: ApiStatusProps) {
   return (
-    <div className="mt-8 flex items-center gap-2 text-sm text-ink/60">
+    <div className="flex items-center gap-2 text-sm text-ink/60">
       <span
         aria-label={`API ${health}`}
         className={`h-2.5 w-2.5 rounded-full ${statusStyles[health]}`}

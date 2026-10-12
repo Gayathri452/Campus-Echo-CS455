@@ -21,7 +21,10 @@ atomic updates.
 
 The React student feedback page submits to the Go API through Vite's `/api`
 development proxy. The API validates the request and inserts an anonymous
-feedback document into MongoDB with the initial `submitted` status.
+feedback document into MongoDB as `flagged` while AI moderation is unavailable.
+Flagged submissions stay out of the moderator queue until a student submits
+their single appeal. That appeal creates an `under_appeal` ticket in the
+moderator collection; moderator resolution updates both the ticket and review.
 
 ```text
 StudentFeedbackPage
@@ -32,10 +35,12 @@ StudentFeedbackPage
   -> backend/internal/database MongoDB store
 ```
 
-The initial feedback record contains a MongoDB ID, course ID, content, status,
-and creation timestamp. It does not contain a student identity. This is only a
-starter persistence path, not the complete submission workflow or API contract
-from the requirements.
+The feedback record contains a MongoDB ID, reference code, course details,
+content, status, flag reason, and creation timestamp. It does not contain a
+student identity. AI classification is not connected yet, so the current
+development behavior flags every submission with a fixed explanatory reason.
+Students can look up that state by reference code, appeal once, and see the
+appeal status and moderator resolution note.
 
 The starter authentication adds separate `users` and `sessions` collections.
 Passwords are bcrypt-hashed; clients receive random 12-hour bearer tokens while

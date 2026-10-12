@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Kishore200524/CS455-Project/backend/internal/appeals"
+	"github.com/Kishore200524/CS455-Project/backend/internal/feedback"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -229,4 +230,85 @@ func equalQueueIDs(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+func TestStudentAppealCreatesModeratorQueueTicket(t *testing.T) {
+	store, ctx := queueIntegrationMongo(t)
+	input := feedback.CreateInput{
+		CourseID:    "CS455",
+		CourseTitle: "Software Engineering",
+		Category:    "teaching",
+		Rating:      4,
+		Content:     "The project workload was too high.",
+	}
+	review, err := store.Create(ctx, input)
+	if err != nil {
+		t.Fatalf("create feedback: %v", err)
+	}
+	if review.Status != feedback.StatusFlagged || review.FlagReason == "" {
+		t.Fatalf("new review = %+v, want a flagged review with a reason", review)
+	}
+
+	count, err := store.appealCollection.CountDocuments(ctx, bson.M{"referenceCode": review.ReferenceCode})
+	if err != nil {
+		t.Fatalf("count appeals before student appeal: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("appeal count before student appeal = %d, want 0", count)
+	}
+
+	appeal, err := store.CreateAppeal(ctx, review.ReferenceCode, "Please reconsider my feedback.")
+	if err != nil {
+		t.Fatalf("create student appeal: %v", err)
+	}
+	if appeal.Status != feedback.StatusUnderAppeal {
+		t.Fatalf("appeal status = %q, want %q", appeal.Status, feedback.StatusUnderAppeal)
+	}
+
+	queued, err := store.ListUnclaimed(ctx, appeals.SortOldestFirst)
+	if err != nil {
+		t.Fatalf("list moderator queue: %v", err)
+	}
+	if len(queued) != 1 || queued[0].ReferenceCode != review.ReferenceCode || queued[0].CourseID != input.CourseID {
+		t.Fatalf("moderator queue after appeal = %+v, want the appealed review", queued)
+	}
+	if queued[0].Year != 0 || queued[0].Professor != "" {
+		t.Fatalf("missing course details = year %d, professor %q; want no fabricated values", queued[0].Year, queued[0].Professor)
+	}
+
+	status, err := store.FindByReference(ctx, review.ReferenceCode)
+	if err != nil {
+		t.Fatalf("find student review status: %v", err)
+	}
+	if status.AppealStatus != appeals.StatusUnderAppeal {
+		t.Fatalf("student appeal status = %q, want %q", status.AppealStatus, appeals.StatusUnderAppeal)
+	}
+
+	if _, err := store.CreateAppeal(ctx, review.ReferenceCode, "A second appeal."); !errors.Is(err, feedback.ErrAppealAlreadyExists) {
+		t.Fatalf("second appeal error = %v, want %v", err, feedback.ErrAppealAlreadyExists)
+	}
+
+	const moderatorID = "appeal-flow-moderator"
+	claimed, err := store.Claim(ctx, queued[0].ID, moderatorID)
+	if err != nil {
+		t.Fatalf("claim student appeal: %v", err)
+	}
+	ticket, err := store.Get(ctx, claimed.ID, moderatorID)
+	if err != nil {
+		t.Fatalf("get claimed student appeal: %v", err)
+	}
+	if ticket.FeedbackText != input.Content || ticket.FlagReason != feedback.FlagReasonReview || ticket.AppealComment != "Please reconsider my feedback." {
+		t.Fatalf("moderator ticket details = %+v, want submitted review, flag reason, and appeal comment", ticket)
+	}
+	if err := store.Resolve(ctx, claimed.ID, moderatorID, appeals.ActionRestore, ""); err != nil {
+		t.Fatalf("resolve student appeal: %v", err)
+	}
+
+	resolved, err := store.FindByReference(ctx, review.ReferenceCode)
+	if err != nil {
+		t.Fatalf("find resolved student review: %v", err)
+	}
+	if resolved.Status != feedback.StatusPublished || resolved.AppealStatus != appeals.StatusRestored {
+		t.Fatalf("resolved review status = %q, appeal status = %q; want published/restored", resolved.Status, resolved.AppealStatus)
+	}
 }

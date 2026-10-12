@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"time"
@@ -330,7 +331,8 @@ func (m *Mongo) Create(ctx context.Context, input feedback.CreateInput) (feedbac
 		"category":      input.Category,
 		"rating":        input.Rating,
 		"content":       input.Content,
-		"status":        feedback.StatusSubmitted,
+		"status":        feedback.StatusFlagged,
+		"flagReason":    feedback.FlagReasonReview,
 		"createdAt":     now,
 	}
 
@@ -352,7 +354,8 @@ func (m *Mongo) Create(ctx context.Context, input feedback.CreateInput) (feedbac
 		Category:      input.Category,
 		Rating:        input.Rating,
 		Content:       input.Content,
-		Status:        feedback.StatusSubmitted,
+		Status:        feedback.StatusFlagged,
+		FlagReason:    feedback.FlagReasonReview,
 		CreatedAt:     now,
 	}, nil
 }
@@ -438,6 +441,22 @@ func (m *Mongo) FindByReference(ctx context.Context, referenceCode string) (feed
 		}
 		return feedback.Feedback{}, fmt.Errorf("find feedback by reference: %w", err)
 	}
+	if result.Status == feedback.StatusFlagged && result.FlagReason == "" {
+		result.FlagReason = feedback.FlagReasonReview
+	}
+
+	var appeal struct {
+		Status            string `bson:"status"`
+		ResolutionComment string `bson:"resolutionComment"`
+	}
+	err := m.appealCollection.FindOne(ctx, bson.M{"referenceCode": referenceCode}).Decode(&appeal)
+	if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
+		return feedback.Feedback{}, fmt.Errorf("find appeal by review reference: %w", err)
+	}
+	if err == nil {
+		result.AppealStatus = appeal.Status
+		result.AppealResolutionComment = appeal.ResolutionComment
+	}
 	return result, nil
 }
 
@@ -449,11 +468,30 @@ func (m *Mongo) CreateAppeal(ctx context.Context, referenceCode, reason string) 
 	if review.Status != feedback.StatusFlagged && review.Status != feedback.StatusRejected {
 		return feedback.Appeal{}, feedback.ErrAppealNotEligible
 	}
-	appeal := feedback.Appeal{ReferenceCode: referenceCode, Reason: reason, Status: "pending", CreatedAt: time.Now().UTC()}
-	if _, err := m.appealCollection.InsertOne(ctx, appeal); err != nil {
+	now := time.Now().UTC()
+	ticket := bson.M{
+		"reviewId":      review.ID,
+		"referenceCode": review.ReferenceCode,
+		"courseId":      review.CourseID,
+		"year":          0,
+		"professor":     "",
+		"status":        feedback.StatusUnderAppeal,
+		"feedbackText":  review.Content,
+		"flagReason":    review.FlagReason,
+		"appealComment": reason,
+		"createdAt":     now,
+	}
+	if _, err := m.appealCollection.InsertOne(ctx, ticket); mongo.IsDuplicateKeyError(err) {
+		return feedback.Appeal{}, feedback.ErrAppealAlreadyExists
+	} else if err != nil {
 		return feedback.Appeal{}, fmt.Errorf("create appeal: %w", err)
 	}
-	return appeal, nil
+	return feedback.Appeal{
+		ReferenceCode: referenceCode,
+		Reason:        reason,
+		Status:        feedback.StatusUnderAppeal,
+		CreatedAt:     now,
+	}, nil
 }
 
 func (m *Mongo) Disconnect(ctx context.Context) error {

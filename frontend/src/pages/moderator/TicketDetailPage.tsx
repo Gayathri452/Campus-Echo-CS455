@@ -112,7 +112,7 @@ function TicketDetailPage({ session, ticketId, onDone }: TicketDetailPageProps) 
       <p className="text-sm font-semibold text-ocean">{ticket.referenceCode}</p>
       <h1 className="mt-2 text-2xl font-bold">Appeal details</h1>
       <p className="mt-2 text-ink/65">
-        {ticket.courseId} · {ticket.year} · {ticket.professor}
+        {ticket.courseId} · {ticket.year || "Not provided"} · {ticket.professor || "Not provided"}
       </p>
 
       <dl className="mt-8 grid gap-6">
