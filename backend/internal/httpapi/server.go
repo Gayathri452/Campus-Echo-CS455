@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/Kishore200524/CS455-Project/backend/internal/appeals"
 	"github.com/Kishore200524/CS455-Project/backend/internal/auth"
 	"github.com/Kishore200524/CS455-Project/backend/internal/feedback"
 )
@@ -13,14 +14,16 @@ type Server struct {
 	feedbackStore feedback.Store
 	authService   *auth.Service
 	cookieSecure  bool
+	appealStore   appeals.Store
 }
 
-func NewServer(feedbackStore feedback.Store, authService *auth.Service, cookieSecure ...bool) http.Handler {
-	secure := false
-	if len(cookieSecure) > 0 {
-		secure = cookieSecure[0]
+// NewServer builds the API handler. Optional dependencies (see WithAppealStore)
+// are passed as trailing options so existing callers keep compiling.
+func NewServer(feedbackStore feedback.Store, authService *auth.Service, options ...Option) http.Handler {
+	server := &Server{feedbackStore: feedbackStore, authService: authService}
+	for _, option := range options {
+		option(server)
 	}
-	server := &Server{feedbackStore: feedbackStore, authService: authService, cookieSecure: secure}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/health", server.health)
 	mux.HandleFunc("POST /api/auth/request-otp", server.requestOTP)
@@ -40,6 +43,7 @@ func NewServer(feedbackStore feedback.Store, authService *auth.Service, cookieSe
 	mux.Handle("GET /api/v1/feedback/ratings", server.requireRole(auth.RoleStudent, http.HandlerFunc(server.courseRatings)))
 	mux.Handle("GET /api/v1/feedback/status/{reference}", server.requireRole(auth.RoleStudent, http.HandlerFunc(server.reviewStatus)))
 	mux.Handle("POST /api/v1/feedback/status/{reference}/appeal", server.requireRole(auth.RoleStudent, http.HandlerFunc(server.createAppeal)))
+	server.registerModeratorRoutes(mux)
 	return mux
 }
 

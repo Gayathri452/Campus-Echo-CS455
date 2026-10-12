@@ -45,7 +45,7 @@ func Connect(ctx context.Context, uri, databaseName string) (*Mongo, error) {
 		userCollection:     database.Collection("users"),
 		sessionCollection:  database.Collection("sessions"),
 		otpCollection:      database.Collection("otp_challenges"),
-		appealCollection:   database.Collection("feedback_appeals"),
+		appealCollection:   database.Collection("appeals"),
 	}
 	if err := store.ensureAuthIndexes(ctx); err != nil {
 		disconnectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
