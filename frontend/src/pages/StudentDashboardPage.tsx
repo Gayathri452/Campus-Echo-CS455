@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import type { AuthSession } from "../services/auth";
+import AnnouncementsPanel from "./student/AnnouncementsPanel";
 import { COURSE_LIST_ID, CourseOptions, CourseTitleAutofill } from "./student/CourseSuggestions";
 import ReferenceNotebookPage from "./student/ReferenceNotebookPage";
 import SaveToNotebook from "./student/SaveToNotebook";
@@ -55,6 +56,7 @@ function StudentDashboardPage({ session, onLogout }: StudentDashboardPageProps) 
       </header>
 
       <div className="mx-auto max-w-5xl px-6 py-10">
+        {view === "home" && <AnnouncementsPanel accessToken={session.accessToken} ownerId={session.user.id} />}
         {view === "home" && <DashboardHome onNavigate={navigate} />}
         {view === "submit" && <SubmitReview accessToken={session.accessToken} onComplete={() => navigate("status")} />}
         {view === "explore" && <ExploreReviews accessToken={session.accessToken} />}
