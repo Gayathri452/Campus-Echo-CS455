@@ -1,6 +1,6 @@
 // Package appeals holds the shared contract for the moderator appeal workflow:
-// ticket shapes, statuses, errors, the store interfaces and the 30-minute lock
-// rule. It uses only the standard library so every other package can import it.
+// ticket shapes, statuses, errors, the store interfaces and lock rules. It uses
+// only the standard library so every other package can import it.
 //
 // This file is the agreed contract between the two people building the
 // moderator pages. Change it only by agreement, in its own small PR, because
@@ -42,6 +42,10 @@ const (
 // (FR-12). After this the ticket is available to every moderator again.
 const LockDuration = 30 * time.Minute
 
+// ExtendedLockDuration is the lock duration selected from the active-appeals
+// page.
+const ExtendedLockDuration = 24 * time.Hour
+
 // Errors returned by stores. Each HTTP handler maps them to a status code.
 var (
 	ErrNotImplemented  = errors.New("not implemented")
@@ -62,6 +66,7 @@ type Summary struct {
 	Professor     string     `json:"professor" bson:"professor"`
 	Status        string     `json:"status" bson:"status"`
 	LockedAt      *time.Time `json:"lockedAt,omitempty" bson:"lockedAt,omitempty"`
+	LockExpiresAt *time.Time `json:"lockExpiresAt,omitempty" bson:"lockExpiresAt,omitempty"`
 	CreatedAt     time.Time  `json:"createdAt" bson:"createdAt"`
 }
 
@@ -102,6 +107,8 @@ type ResolveStore interface {
 	Get(ctx context.Context, ticketID, moderatorID string) (Ticket, error)
 	// Release returns a ticket held by moderatorID to the queue.
 	Release(ctx context.Context, ticketID, moderatorID string) error
+	// ExtendLock renews the lock held by moderatorID for ExtendedLockDuration.
+	ExtendLock(ctx context.Context, ticketID, moderatorID string) (time.Time, error)
 	// Resolve closes a ticket held by moderatorID. ActionRestore publishes the
 	// review; ActionDelete removes it and needs a non-empty comment
 	// (ErrCommentRequired), which the student can later read.
@@ -117,8 +124,8 @@ type Store interface {
 	ResolveStore
 }
 
-// LockExpiryCutoff returns the moment before which a lock counts as expired at
-// time now. Stores use it in queries; never recompute "30 minutes" elsewhere.
+// LockExpiryCutoff returns the moment before which a legacy lock without an
+// explicit expiry counts as expired at time now.
 func LockExpiryCutoff(now time.Time) time.Time {
 	return now.Add(-LockDuration)
 }

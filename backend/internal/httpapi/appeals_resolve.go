@@ -12,6 +12,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/Kishore200524/CS455-Project/backend/internal/appeals"
 )
@@ -48,6 +49,22 @@ func (s *Server) releaseAppeal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// extendAppealLock handles POST /api/v1/appeals/{id}/extend-lock. Responds
+// 200 with the updated lockExpiresAt for the current lock holder.
+func (s *Server) extendAppealLock(w http.ResponseWriter, r *http.Request) {
+	user, ok := userFromContext(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "authenticated user unavailable"})
+		return
+	}
+	expiresAt, err := s.appealStore.ExtendLock(r.Context(), r.PathValue("id"), user.ID)
+	if err != nil {
+		s.writeAppealResolveError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]time.Time{"lockExpiresAt": expiresAt})
 }
 
 // resolveAppeal handles POST /api/v1/appeals/{id}/resolve with

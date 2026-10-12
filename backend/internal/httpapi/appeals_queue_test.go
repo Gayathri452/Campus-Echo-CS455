@@ -53,6 +53,10 @@ func (s *queueFakeStore) Release(context.Context, string, string) error {
 	return appeals.ErrNotImplemented
 }
 
+func (s *queueFakeStore) ExtendLock(context.Context, string, string) (time.Time, error) {
+	return time.Time{}, appeals.ErrNotImplemented
+}
+
 func (s *queueFakeStore) Resolve(context.Context, string, string, string, string) error {
 	return appeals.ErrNotImplemented
 }
