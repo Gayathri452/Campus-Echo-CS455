@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import type { AuthSession, AuthUser } from "../services/auth";
 import { provisionModerator, removeModerator } from "../services/auth";
+import CourseCatalogSection from "./admin/CourseCatalogSection";
 
 interface AdministratorPageProps {
   session: AuthSession;
@@ -180,6 +181,7 @@ function AdministratorPage({ session, onLogout }: AdministratorPageProps) {
             {isRemoving ? "Removing…" : "Remove moderator"}
           </button>
         </form>
+        <CourseCatalogSection accessToken={session.accessToken ?? ""} />
       </section>
     </main>
   );
