@@ -1,6 +1,8 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import type { AuthSession } from "../services/auth";
 import { COURSE_LIST_ID, CourseOptions, CourseTitleAutofill } from "./student/CourseSuggestions";
+import ReferenceNotebookPage from "./student/ReferenceNotebookPage";
+import SaveToNotebook from "./student/SaveToNotebook";
 import {
   createAppeal,
   exploreFeedback,
@@ -10,7 +12,7 @@ import {
   type FeedbackResponse,
 } from "../services/feedback";
 
-type StudentView = "home" | "submit" | "explore" | "status";
+type StudentView = "home" | "submit" | "explore" | "status" | "codes";
 
 interface StudentDashboardPageProps {
   session: AuthSession;
@@ -43,6 +45,7 @@ function StudentDashboardPage({ session, onLogout }: StudentDashboardPageProps) 
             <NavButton active={view === "home"} onClick={() => navigate("home")}>Overview</NavButton>
             <NavButton active={view === "submit"} onClick={() => navigate("submit")}>Submit review</NavButton>
             <NavButton active={view === "explore"} onClick={() => navigate("explore")}>Explore reviews</NavButton>
+            <NavButton active={view === "codes"} onClick={() => navigate("codes")}>My codes</NavButton>
             <NavButton active={view === "status"} onClick={() => navigate("status")}>Track status</NavButton>
             <button className="rounded-lg border border-ink/15 px-4 py-2 text-sm font-semibold hover:bg-mist" onClick={onLogout} type="button">
               Sign out
@@ -55,6 +58,7 @@ function StudentDashboardPage({ session, onLogout }: StudentDashboardPageProps) 
         {view === "home" && <DashboardHome onNavigate={navigate} />}
         {view === "submit" && <SubmitReview accessToken={session.accessToken} onComplete={() => navigate("status")} />}
         {view === "explore" && <ExploreReviews accessToken={session.accessToken} />}
+        {view === "codes" && <ReferenceNotebookPage accessToken={session.accessToken} onTrack={() => navigate("status")} ownerId={session.user.id} />}
         <CourseOptions accessToken={session.accessToken} />
         {view === "status" && <ReviewStatus accessToken={session.accessToken} />}
       </div>
@@ -125,6 +129,7 @@ function SubmitReview({ accessToken, onComplete }: { accessToken?: string; onCom
             {result.referenceCode}
           </p>
         </div>
+        <SaveToNotebook accessToken={accessToken} courseId={result.courseId} courseTitle={result.courseTitle} referenceCode={result.referenceCode} status={result.status} />
         <div className="mt-6 flex flex-wrap gap-3">
           <button className="rounded-lg bg-ocean px-4 py-2 text-sm font-semibold text-white hover:bg-ocean/90" onClick={onComplete} type="button">Track this review</button>
           <button className="rounded-lg border border-ink/15 px-4 py-2 text-sm font-semibold hover:bg-mist" onClick={() => setResult(null)} type="button">Submit another review</button>
