@@ -35,6 +35,7 @@ type appealSummaryDoc struct {
 	Professor     string             `bson:"professor"`
 	Status        string             `bson:"status"`
 	LockedAt      *time.Time         `bson:"lockedAt,omitempty"`
+	LockExpiresAt *time.Time         `bson:"lockExpiresAt,omitempty"`
 	CreatedAt     time.Time          `bson:"createdAt"`
 }
 
@@ -47,6 +48,7 @@ func summaryFromDoc(doc appealSummaryDoc) appeals.Summary {
 		Professor:     doc.Professor,
 		Status:        doc.Status,
 		LockedAt:      doc.LockedAt,
+		LockExpiresAt: doc.LockExpiresAt,
 		CreatedAt:     doc.CreatedAt,
 	}
 }
@@ -55,8 +57,22 @@ func claimableFilter(now time.Time) bson.M {
 	return bson.M{
 		"$or": []bson.M{
 			{"status": appeals.StatusUnderAppeal},
-			{"status": appeals.StatusLocked, "lockedAt": bson.M{"$lte": appeals.LockExpiryCutoff(now)}},
+			{"status": appeals.StatusLocked, "$or": expiredLockConditions(now)},
 		},
+	}
+}
+
+func unexpiredLockConditions(now time.Time) []bson.M {
+	return []bson.M{
+		{"lockExpiresAt": bson.M{"$gt": now}},
+		{"lockExpiresAt": nil, "lockedAt": bson.M{"$gt": appeals.LockExpiryCutoff(now)}},
+	}
+}
+
+func expiredLockConditions(now time.Time) []bson.M {
+	return []bson.M{
+		{"lockExpiresAt": bson.M{"$lte": now}},
+		{"lockExpiresAt": nil, "lockedAt": bson.M{"$lte": appeals.LockExpiryCutoff(now)}},
 	}
 }
 
@@ -97,7 +113,10 @@ func (m *Mongo) Claim(ctx context.Context, ticketID, moderatorID string) (appeal
 	var updated appealSummaryDoc
 	result := m.appealCollection.FindOneAndUpdate(ctx,
 		bson.M{"_id": objectID, "$or": claimableFilter(now)["$or"]},
-		bson.M{"$set": bson.M{"status": appeals.StatusLocked, "lockedBy": moderatorID, "lockedAt": now}},
+		bson.M{"$set": bson.M{
+			"status": appeals.StatusLocked, "lockedBy": moderatorID,
+			"lockedAt": now, "lockExpiresAt": now.Add(appeals.LockDuration),
+		}},
 		options.FindOneAndUpdate().SetReturnDocument(options.After),
 	)
 	if err := result.Decode(&updated); err != nil {
@@ -117,9 +136,9 @@ func (m *Mongo) Claim(ctx context.Context, ticketID, moderatorID string) (appeal
 func (m *Mongo) ListMine(ctx context.Context, moderatorID string) ([]appeals.Summary, error) {
 	now := time.Now().UTC()
 	filter := bson.M{
-		"status":    appeals.StatusLocked,
-		"lockedBy":  moderatorID,
-		"lockedAt":  bson.M{"$gt": appeals.LockExpiryCutoff(now)},
+		"status":   appeals.StatusLocked,
+		"lockedBy": moderatorID,
+		"$or":      unexpiredLockConditions(now),
 	}
 	cursor, err := m.appealCollection.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "createdAt", Value: 1}}))
 	if err != nil {

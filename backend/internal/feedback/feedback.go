@@ -12,15 +12,17 @@ import (
 )
 
 const (
-	MaxContentLength = 5000
-	MaxCourseTitle   = 160
-	MaxCategory      = 60
-	MinRating        = 1
-	MaxRating        = 5
-	StatusSubmitted  = "submitted"
-	StatusFlagged    = "flagged"
-	StatusRejected   = "rejected"
-	StatusPublished  = "published"
+	MaxContentLength  = 5000
+	MaxCourseTitle    = 160
+	MaxCategory       = 60
+	MinRating         = 1
+	MaxRating         = 5
+	StatusSubmitted   = "submitted"
+	StatusFlagged     = "flagged"
+	StatusRejected    = "rejected"
+	StatusPublished   = "published"
+	FlagReasonReview  = "Held for moderator review; AI moderation is not enabled yet"
+	StatusUnderAppeal = "under_appeal"
 )
 
 var (
@@ -32,6 +34,7 @@ var (
 	ErrReviewNotFound     = errors.New("review was not found")
 	ErrAppealNotEligible  = errors.New("this review is not eligible for an appeal")
 	ErrReviewNotEligible  = errors.New("review is not eligible for this status update")
+  ErrAppealAlreadyExists = errors.New("this review has already been appealed")
 )
 
 type CreateInput struct {
@@ -43,17 +46,19 @@ type CreateInput struct {
 }
 
 type Feedback struct {
-	ID            string     `json:"-" bson:"_id,omitempty"`
-	ReferenceCode string     `json:"referenceCode" bson:"referenceCode"`
-	CourseID      string     `json:"courseId" bson:"courseId"`
-	CourseTitle   string     `json:"courseTitle" bson:"courseTitle"`
-	Category      string     `json:"category" bson:"category"`
-	Rating        int        `json:"rating" bson:"rating"`
-	Content       string     `json:"content" bson:"content"`
-	Status        string     `json:"status" bson:"status"`
-	FlagReason    string     `json:"flagReason,omitempty" bson:"flagReason,omitempty"`
-	CreatedAt     time.Time  `json:"createdAt" bson:"createdAt"`
-	PublishedAt   *time.Time `json:"publishedAt,omitempty" bson:"publishedAt,omitempty"`
+	ID                      string     `json:"-" bson:"_id,omitempty"`
+	ReferenceCode           string     `json:"referenceCode" bson:"referenceCode"`
+	CourseID                string     `json:"courseId" bson:"courseId"`
+	CourseTitle             string     `json:"courseTitle" bson:"courseTitle"`
+	Category                string     `json:"category" bson:"category"`
+	Rating                  int        `json:"rating" bson:"rating"`
+	Content                 string     `json:"content" bson:"content"`
+	Status                  string     `json:"status" bson:"status"`
+	FlagReason              string     `json:"flagReason,omitempty" bson:"flagReason,omitempty"`
+	AppealStatus            string     `json:"appealStatus,omitempty" bson:"-"`
+	AppealResolutionComment string     `json:"appealResolutionComment,omitempty" bson:"-"`
+	CreatedAt               time.Time  `json:"createdAt" bson:"createdAt"`
+	PublishedAt             *time.Time `json:"publishedAt,omitempty" bson:"publishedAt,omitempty"`
 }
 
 type ExploreFilters struct {

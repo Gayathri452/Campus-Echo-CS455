@@ -40,7 +40,7 @@ func (m *Mongo) Get(ctx context.Context, ticketID, moderatorID string) (appeals.
 		"_id":      id,
 		"status":   appeals.StatusLocked,
 		"lockedBy": moderatorID,
-		"lockedAt": bson.M{"$gt": appeals.LockExpiryCutoff(now)},
+		"$or":      unexpiredLockConditions(now),
 	}
 	var record struct {
 		ID                primitive.ObjectID `bson:"_id"`
@@ -50,6 +50,7 @@ func (m *Mongo) Get(ctx context.Context, ticketID, moderatorID string) (appeals.
 		Professor         string             `bson:"professor"`
 		Status            string             `bson:"status"`
 		LockedAt          *time.Time         `bson:"lockedAt"`
+		LockExpiresAt     *time.Time         `bson:"lockExpiresAt"`
 		CreatedAt         time.Time          `bson:"createdAt"`
 		ReviewID          string             `bson:"reviewId"`
 		FeedbackText      string             `bson:"feedbackText"`
@@ -76,7 +77,8 @@ func (m *Mongo) Get(ctx context.Context, ticketID, moderatorID string) (appeals.
 		Summary: appeals.Summary{
 			ID: record.ID.Hex(), ReferenceCode: record.ReferenceCode,
 			CourseID: record.CourseID, Year: record.Year, Professor: record.Professor,
-			Status: record.Status, LockedAt: record.LockedAt, CreatedAt: record.CreatedAt,
+			Status: record.Status, LockedAt: record.LockedAt,
+			LockExpiresAt: record.LockExpiresAt, CreatedAt: record.CreatedAt,
 		},
 		ReviewID: record.ReviewID, FeedbackText: record.FeedbackText,
 		FlagReason: record.FlagReason, AppealComment: record.AppealComment,
@@ -92,7 +94,7 @@ func (m *Mongo) Release(ctx context.Context, ticketID, moderatorID string) error
 	}
 	result, err := m.appealCollection.UpdateOne(ctx, activeLockFilter(id, moderatorID, time.Now().UTC()), bson.M{
 		"$set":   bson.M{"status": appeals.StatusUnderAppeal},
-		"$unset": bson.M{"lockedBy": "", "lockedAt": ""},
+		"$unset": bson.M{"lockedBy": "", "lockedAt": "", "lockExpiresAt": ""},
 	})
 	if err != nil {
 		return fmt.Errorf("release appeal ticket: %w", err)
@@ -101,6 +103,26 @@ func (m *Mongo) Release(ctx context.Context, ticketID, moderatorID string) error
 		return appeals.ErrNotLockHolder
 	}
 	return nil
+}
+
+func (m *Mongo) ExtendLock(ctx context.Context, ticketID, moderatorID string) (time.Time, error) {
+	id, err := primitive.ObjectIDFromHex(ticketID)
+	if err != nil {
+		return time.Time{}, appeals.ErrNotLockHolder
+	}
+
+	now := time.Now().UTC()
+	expiresAt := now.Add(appeals.ExtendedLockDuration)
+	result, err := m.appealCollection.UpdateOne(ctx, activeLockFilter(id, moderatorID, now), bson.M{
+		"$set": bson.M{"lockExpiresAt": expiresAt},
+	})
+	if err != nil {
+		return time.Time{}, fmt.Errorf("extend appeal lock: %w", err)
+	}
+	if result.MatchedCount == 0 {
+		return time.Time{}, appeals.ErrNotLockHolder
+	}
+	return expiresAt, nil
 }
 
 func (m *Mongo) Resolve(ctx context.Context, ticketID, moderatorID, action, comment string) error {
@@ -172,11 +194,11 @@ func (m *Mongo) Resolve(ctx context.Context, ticketID, moderatorID, action, comm
 
 func (m *Mongo) ReleaseExpired(ctx context.Context, now time.Time) (int64, error) {
 	result, err := m.appealCollection.UpdateMany(ctx, bson.M{
-		"status":   appeals.StatusLocked,
-		"lockedAt": bson.M{"$lte": appeals.LockExpiryCutoff(now)},
+		"status": appeals.StatusLocked,
+		"$or":    expiredLockConditions(now),
 	}, bson.M{
 		"$set":   bson.M{"status": appeals.StatusUnderAppeal},
-		"$unset": bson.M{"lockedBy": "", "lockedAt": ""},
+		"$unset": bson.M{"lockedBy": "", "lockedAt": "", "lockExpiresAt": ""},
 	})
 	if err != nil {
 		return 0, fmt.Errorf("release expired appeal locks: %w", err)
@@ -189,7 +211,7 @@ func activeLockFilter(id primitive.ObjectID, moderatorID string, now time.Time) 
 		"_id":      id,
 		"status":   appeals.StatusLocked,
 		"lockedBy": moderatorID,
-		"lockedAt": bson.M{"$gt": appeals.LockExpiryCutoff(now)},
+		"$or":      unexpiredLockConditions(now),
 	}
 }
 

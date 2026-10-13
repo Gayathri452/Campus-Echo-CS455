@@ -114,6 +114,10 @@ func (s *Server) createAppeal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	appeal, err := appeals.CreateAppeal(r.Context(), r.PathValue("reference"), input.Reason)
+	if errors.Is(err, feedback.ErrAppealAlreadyExists) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
 	if errors.Is(err, feedback.ErrAppealNotEligible) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return

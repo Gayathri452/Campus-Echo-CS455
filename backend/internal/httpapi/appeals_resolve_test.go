@@ -17,6 +17,7 @@ type resolveTestStore struct {
 	resolveComment string
 	resolveCalls   int
 	releaseCalls   int
+	extendCalls    int
 }
 
 func (s *resolveTestStore) ListUnclaimed(context.Context, string) ([]appeals.Summary, error) {
@@ -38,6 +39,11 @@ func (s *resolveTestStore) Get(context.Context, string, string) (appeals.Ticket,
 func (s *resolveTestStore) Release(context.Context, string, string) error {
 	s.releaseCalls++
 	return nil
+}
+
+func (s *resolveTestStore) ExtendLock(context.Context, string, string) (time.Time, error) {
+	s.extendCalls++
+	return time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC), nil
 }
 
 func (s *resolveTestStore) Resolve(_ context.Context, _, _, action, comment string) error {

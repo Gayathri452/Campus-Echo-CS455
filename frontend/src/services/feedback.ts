@@ -18,6 +18,9 @@ export interface FeedbackInput {
 export interface FeedbackResponse extends FeedbackInput {
   referenceCode: string;
   status: string;
+  flagReason?: string;
+  appealStatus?: string;
+  appealResolutionComment?: string;
   createdAt: string;
   flagReason?: string;
   publishedAt?: string;
@@ -81,7 +84,9 @@ function isFeedback(value: unknown): value is FeedbackResponse {
     typeof value.content === "string" &&
     typeof value.status === "string" &&
     typeof value.createdAt === "string" &&
-    (value.flagReason === undefined || typeof value.flagReason === "string");
+    (value.flagReason === undefined || typeof value.flagReason === "string") &&
+    (value.appealStatus === undefined || typeof value.appealStatus === "string") &&
+    (value.appealResolutionComment === undefined || typeof value.appealResolutionComment === "string");
 }
 
 function isCourseRating(value: unknown): value is CourseRating {

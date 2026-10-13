@@ -1,0 +1,54 @@
+CS201A, Mathematics for Computer Science I
+CS202A, Mathematics for Computer Science II
+CS210A, Data Structures and Algorithms
+CS220A, Computer Organization
+CS251A, Computing Laboratory I
+CS252A, Computing Laboratory II
+CS300A, Technical Communication
+CS315A, Principles of Database Systems
+CS330A, Operating Systems
+CS335A, Compiler Design
+CS340A, Theory of Computation
+CS345A, Algorithms II
+CS350A, Principles of Programming Languages
+CS360A, Introduction to Computer Graphics
+CS365A, Artificial Intelligence Programming
+CS396A, UG Project (UGP-II)
+CS422A, Computer Architecture
+CS425A, Computer Networks
+CS433A, Parallel Programming
+CS455A, Introduction to Software Engineering
+CS498A, Undergraduate Project III
+CS601A, Mathematics for Computer Science
+CS602A, Design and Analysis of Algorithms
+CS618A, Indexing and Searching Techniques in Database
+CS625A, Advanced Computer Networks
+CS628A, Computer Systems Security
+CS632A, Topics in Distributed Systems
+CS634A, Mobile Computing
+CS640A, Computational Complexity
+CS641A, Modern Cryptology
+CS644A, Finite Automata on Infinite Inputs
+CS646A, Parallel Algorithms
+CS647A, Advanced Topics in Algorithms & Data Structures
+CS648A, Randomized Algorithms
+CS653A, Bioelectricity and Bio-Electronic Devices
+CS654A, Software Architecture
+CS663A, Computational Geometry
+CS671A, Introduction to Natural Language Processing
+CS676A, Computer Vision and Image Processing
+CS679A, Machine Learning for Computer Vision
+CS680A, Category Theory
+CS681A, Computational Number Theory and Algebra
+CS682A, Quantum Computing
+CS683A, Computational Arithmetic-Geometry & Applications
+CS687A, Algorithmic Information Theory
+CS697A, Special Topics in Computer Science
+CS698A, Special Topics: Game Theory and Its Applications in Computer Science
+CS719A, Data Streaming: Algorithms & Systems
+CS743A, Advanced Graph Algorithms
+CS746A, Riemann Hypothesis and Its Applications
+CS771A, Machine Learning Techniques
+ESC101A, Fundamentals of Computing
+ESO207A, Data Structures & Algorithms
+SE367A, Introduction to Cognitive Science

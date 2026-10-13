@@ -17,6 +17,7 @@ import (
 
 type memoryStore struct {
 	created feedback.Feedback
+	appeal  *feedback.Appeal
 }
 
 type captureTriageDispatcher struct {
@@ -101,24 +102,68 @@ func (m *memoryStore) Create(_ context.Context, input feedback.CreateInput) (fee
 		Category:      input.Category,
 		Rating:        input.Rating,
 		Content:       input.Content,
-		Status:        feedback.StatusSubmitted,
+		Status:        feedback.StatusFlagged,
+		FlagReason:    feedback.FlagReasonReview,
 	}
 	return m.created, nil
 }
 
-func (m *memoryStore) FindByReference(_ context.Context, referenceCode string) (feedback.Feedback, error) {
-	if m.created.ReferenceCode != referenceCode {
-		return feedback.Feedback{}, feedback.ErrReviewNotFound
-	}
-	return m.created, nil
+func (m *memoryStore) Explore(
+    context.Context,
+    feedback.ExploreFilters,
+) ([]feedback.Feedback, error) {
+    return []feedback.Feedback{}, nil
 }
 
-func (m *memoryStore) Explore(context.Context, feedback.ExploreFilters) ([]feedback.Feedback, error) {
-	return nil, nil
+func (m *memoryStore) CourseRatings(
+    context.Context,
+    string,
+) ([]feedback.CourseRating, error) {
+    return []feedback.CourseRating{}, nil
 }
 
-func (m *memoryStore) CourseRatings(context.Context, string) ([]feedback.CourseRating, error) {
-	return nil, nil
+func (m *memoryStore) FindByReference(
+    _ context.Context,
+    reference string,
+) (feedback.Feedback, error) {
+    if m.created.ReferenceCode != reference {
+        return feedback.Feedback{}, feedback.ErrReviewNotFound
+    }
+
+    result := m.created
+    if m.appeal != nil {
+        result.AppealStatus = m.appeal.Status
+    }
+
+    return result, nil
+}
+
+func (m *memoryStore) CreateAppeal(
+    _ context.Context,
+    reference, reason string,
+) (feedback.Appeal, error) {
+    if m.created.ReferenceCode != reference {
+        return feedback.Appeal{}, feedback.ErrReviewNotFound
+    }
+
+    if m.created.Status != feedback.StatusFlagged &&
+        m.created.Status != feedback.StatusRejected {
+        return feedback.Appeal{}, feedback.ErrAppealNotEligible
+    }
+
+    if m.appeal != nil {
+        return feedback.Appeal{}, feedback.ErrAppealAlreadyExists
+    }
+
+    appeal := feedback.Appeal{
+        ReferenceCode: reference,
+        Reason:        reason,
+        Status:        feedback.StatusUnderAppeal,
+        CreatedAt:     time.Now().UTC(),
+    }
+
+    m.appeal = &appeal
+    return appeal, nil
 }
 
 func TestCreateFeedback(t *testing.T) {
@@ -149,7 +194,7 @@ func TestCreateFeedback(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if result.ReferenceCode != "CE-TEST123" || result.Status != feedback.StatusSubmitted {
+	if result.ReferenceCode != "CE-TEST123" || result.Status != feedback.StatusFlagged || result.FlagReason != feedback.FlagReasonReview {
 		t.Fatalf("unexpected response: %+v", result)
 	}
 	if dispatcher.reviewID != store.created.ID {
@@ -215,6 +260,58 @@ func TestReviewStatusReturnsSavedFlagReason(t *testing.T) {
 	}
 	if result.Status != feedback.StatusFlagged || result.FlagReason != store.created.FlagReason {
 		t.Fatalf("status response = (%s, %q)", result.Status, result.FlagReason)
+	}
+}
+
+func TestFeedbackAppealAppearsInStatusAndCanOnlyBeSubmittedOnce(t *testing.T) {
+	store := &memoryStore{}
+	authService := auth.NewService(newMemoryAuthRepository())
+	session, err := authService.RegisterStudent(context.Background(), "student@iitk.ac.in", "long-secure-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(store, authService)
+
+	submit := httptest.NewRequest(http.MethodPost, "/api/v1/feedback", strings.NewReader(
+		`{"courseId":"CS455","courseTitle":"Software Engineering","category":"teaching","rating":4,"content":"Helpful examples"}`,
+	))
+	submit.Header.Set("Authorization", "Bearer "+session.AccessToken)
+	submitResponse := httptest.NewRecorder()
+	handler.ServeHTTP(submitResponse, submit)
+	if submitResponse.Code != http.StatusCreated {
+		t.Fatalf("submission status = %d, want %d; body: %s", submitResponse.Code, http.StatusCreated, submitResponse.Body.String())
+	}
+	if store.created.Status != feedback.StatusFlagged {
+		t.Fatalf("new review status = %q, want flagged", store.created.Status)
+	}
+
+	appealRequest := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/feedback/status/CE-TEST123/appeal", strings.NewReader(`{"reason":"Please reconsider this review."}`))
+		request.Header.Set("Authorization", "Bearer "+session.AccessToken)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	firstAppeal := appealRequest()
+	if firstAppeal.Code != http.StatusCreated {
+		t.Fatalf("first appeal status = %d, want %d; body: %s", firstAppeal.Code, http.StatusCreated, firstAppeal.Body.String())
+	}
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/feedback/status/CE-TEST123", nil)
+	statusRequest.Header.Set("Authorization", "Bearer "+session.AccessToken)
+	statusResponse := httptest.NewRecorder()
+	handler.ServeHTTP(statusResponse, statusRequest)
+	var status feedback.Feedback
+	if err := json.NewDecoder(statusResponse.Body).Decode(&status); err != nil {
+		t.Fatalf("decode review status: %v", err)
+	}
+	if statusResponse.Code != http.StatusOK || status.Status != feedback.StatusFlagged || status.FlagReason != feedback.FlagReasonReview || status.AppealStatus != feedback.StatusUnderAppeal {
+		t.Fatalf("unexpected review status response (%d): %+v", statusResponse.Code, status)
+	}
+
+	secondAppeal := appealRequest()
+	if secondAppeal.Code != http.StatusConflict {
+		t.Fatalf("second appeal status = %d, want %d; body: %s", secondAppeal.Code, http.StatusConflict, secondAppeal.Body.String())
 	}
 }
 

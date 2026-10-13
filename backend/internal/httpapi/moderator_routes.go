@@ -46,6 +46,7 @@ func (s *Server) registerModeratorRoutes(mux *http.ServeMux) {
 	// Page 2 (Person B) - appeals_resolve.go
 	mux.Handle("GET /api/v1/appeals/{id}", moderatorOnly(s.getAppeal))
 	mux.Handle("POST /api/v1/appeals/{id}/release", moderatorOnly(s.releaseAppeal))
+	mux.Handle("POST /api/v1/appeals/{id}/extend-lock", moderatorOnly(s.extendAppealLock))
 	mux.Handle("POST /api/v1/appeals/{id}/resolve", moderatorOnly(s.resolveAppeal))
 }
 

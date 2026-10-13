@@ -48,6 +48,9 @@ func (s *sweepCounter) Get(context.Context, string, string) (Ticket, error) {
 	return Ticket{}, ErrNotImplemented
 }
 func (s *sweepCounter) Release(context.Context, string, string) error { return ErrNotImplemented }
+func (s *sweepCounter) ExtendLock(context.Context, string, string) (time.Time, error) {
+	return time.Time{}, ErrNotImplemented
+}
 func (s *sweepCounter) Resolve(context.Context, string, string, string, string) error {
 	return ErrNotImplemented
 }

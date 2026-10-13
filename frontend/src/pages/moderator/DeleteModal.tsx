@@ -59,7 +59,7 @@ function DeleteModal({ isSubmitting, onCancel, onSubmit }: DeleteModalProps) {
               Cancel
             </button>
             <button
-              className="rounded-lg bg-rose-700 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-60"
+              className="rounded-lg bg-ocean px-4 py-2 text-sm font-semibold text-white hover:bg-ocean/90 disabled:cursor-not-allowed disabled:opacity-60"
               disabled={isSubmitting || comment.trim().length === 0}
               type="submit"
             >
