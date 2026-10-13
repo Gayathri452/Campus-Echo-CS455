@@ -177,6 +177,9 @@ func TestTriageClaimRecoveryAndStatusPersistence(t *testing.T) {
 	if err != nil || !ok || claimed.ID != created.ID {
 		t.Fatalf("first triage claim = (%+v, %v, %v)", claimed, ok, err)
 	}
+	if claimed.TriageAttempts != 1 {
+		t.Fatalf("first triage attempt = %d, want 1", claimed.TriageAttempts)
+	}
 	if _, ok, err := store.ClaimForTriage(ctx, created.ID, time.Minute); err != nil || ok {
 		t.Fatalf("duplicate triage claim = (%v, %v), want false without error", ok, err)
 	}
@@ -190,6 +193,10 @@ func TestTriageClaimRecoveryAndStatusPersistence(t *testing.T) {
 	if pending, err := store.ListSubmitted(ctx, 10); err != nil || len(pending) != 1 {
 		t.Fatalf("released review missing from recovery: (%+v, %v)", pending, err)
 	}
+	claimed, ok, err = store.ClaimForTriage(ctx, created.ID, time.Minute)
+	if err != nil || !ok || claimed.TriageAttempts != 2 {
+		t.Fatalf("recovered triage claim = (%+v, %v, %v), want persisted attempt 2", claimed, ok, err)
+	}
 	if err := store.UpdateStatus(ctx, created.ID, feedback.StatusFlagged, "harassment: targeted abuse"); err != nil {
 		t.Fatalf("persist triage status: %v", err)
 	}
@@ -199,6 +206,27 @@ func TestTriageClaimRecoveryAndStatusPersistence(t *testing.T) {
 	}
 	if updated.Status != feedback.StatusFlagged || updated.FlagReason != "harassment: targeted abuse" {
 		t.Fatalf("updated review = (%s, %q)", updated.Status, updated.FlagReason)
+	}
+
+	failedReview, err := store.Create(ctx, feedback.CreateInput{
+		CourseID: "CS455", CourseTitle: "Software Engineering", Category: "teaching",
+		Rating: 4, Content: "A review whose classifier failed.",
+	})
+	if err != nil {
+		t.Fatalf("create review for terminal failure: %v", err)
+	}
+	if _, ok, err := store.ClaimForTriage(ctx, failedReview.ID, time.Minute); err != nil || !ok {
+		t.Fatalf("claim review for terminal failure = (%v, %v)", ok, err)
+	}
+	if err := store.MarkTriageFailed(ctx, failedReview.ID, feedback.ProcessingFailureMessage); err != nil {
+		t.Fatalf("persist terminal triage failure: %v", err)
+	}
+	failed, err := store.FindByReference(ctx, failedReview.ReferenceCode)
+	if err != nil {
+		t.Fatalf("find terminally failed review: %v", err)
+	}
+	if failed.Status != feedback.StatusTriageFailed || failed.ProcessingError != feedback.ProcessingFailureMessage {
+		t.Fatalf("terminal failure state = (%s, %q)", failed.Status, failed.ProcessingError)
 	}
 }
 
@@ -322,8 +350,11 @@ func TestStudentAppealCreatesModeratorQueueTicket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create feedback: %v", err)
 	}
-	if review.Status != feedback.StatusFlagged || review.FlagReason == "" {
-		t.Fatalf("new review = %+v, want a flagged review with a reason", review)
+	if review.Status != feedback.StatusSubmitted {
+		t.Fatalf("new review status = %q, want %q before asynchronous triage", review.Status, feedback.StatusSubmitted)
+	}
+	if err := store.UpdateStatus(ctx, review.ID, feedback.StatusFlagged, "other: requires review"); err != nil {
+		t.Fatalf("mark review flagged for appeal: %v", err)
 	}
 
 	count, err := store.appealCollection.CountDocuments(ctx, bson.M{"referenceCode": review.ReferenceCode})
@@ -374,7 +405,7 @@ func TestStudentAppealCreatesModeratorQueueTicket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get claimed student appeal: %v", err)
 	}
-	if ticket.FeedbackText != input.Content || ticket.FlagReason != feedback.FlagReasonReview || ticket.AppealComment != "Please reconsider my feedback." {
+	if ticket.FeedbackText != input.Content || ticket.FlagReason != "other: requires review" || ticket.AppealComment != "Please reconsider my feedback." {
 		t.Fatalf("moderator ticket details = %+v, want submitted review, flag reason, and appeal comment", ticket)
 	}
 	if err := store.Resolve(ctx, claimed.ID, moderatorID, appeals.ActionRestore, ""); err != nil {

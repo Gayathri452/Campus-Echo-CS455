@@ -21,8 +21,10 @@ const (
 	StatusFlagged     = "flagged"
 	StatusRejected    = "rejected"
 	StatusPublished   = "published"
+	StatusTriageFailed = "triage_failed"
 	FlagReasonReview  = "Held for moderator review; AI moderation is not enabled yet"
 	StatusUnderAppeal = "under_appeal"
+	ProcessingFailureMessage = "Automatic moderation could not complete after retrying. Please contact support."
 )
 
 var (
@@ -55,6 +57,8 @@ type Feedback struct {
 	Content                 string     `json:"content" bson:"content"`
 	Status                  string     `json:"status" bson:"status"`
 	FlagReason              string     `json:"flagReason,omitempty" bson:"flagReason,omitempty"`
+	ProcessingError         string     `json:"processingError,omitempty" bson:"processingError,omitempty"`
+	TriageAttempts          int        `json:"-" bson:"triageAttempts,omitempty"`
 	AppealStatus            string     `json:"appealStatus,omitempty" bson:"-"`
 	AppealResolutionComment string     `json:"appealResolutionComment,omitempty" bson:"-"`
 	CreatedAt               time.Time  `json:"createdAt" bson:"createdAt"`

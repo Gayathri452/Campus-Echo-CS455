@@ -3,6 +3,8 @@ package triage
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -18,12 +20,16 @@ type fakeGeminiClient struct {
 	model    string
 	contents []*genai.Content
 	config   *genai.GenerateContentConfig
+	generate func(context.Context, string, []*genai.Content, *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error)
 }
 
-func (f *fakeGeminiClient) GenerateContent(_ context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+func (f *fakeGeminiClient) GenerateContent(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
 	f.model = model
 	f.contents = contents
 	f.config = config
+	if f.generate != nil {
+		return f.generate(ctx, model, contents, config)
+	}
 	return f.response, f.err
 }
 
@@ -56,6 +62,17 @@ func TestGeminiProviderUsesStructuredClassification(t *testing.T) {
 	}
 	if client.config.ResponseMIMEType != "application/json" || client.config.ResponseSchema == nil || client.config.ResponseSchema.Type != genai.TypeObject {
 		t.Fatalf("request did not configure a JSON object schema: %+v", client.config)
+	}
+	minimalThinking := genai.ThinkingLevelMinimal
+	client = &fakeGeminiClient{response: geminiTextResponse(
+		`{"decision":"publish","reasonCode":"acceptable","explanation":"A negative opinion about the course."}`,
+	)}
+	provider = newGeminiProviderWithClient(client, "gemini-3-flash-lite", time.Second)
+	if _, err := provider.Classify(context.Background(), feedback.Feedback{Content: "The course is badly organized."}); err != nil {
+		t.Fatalf("Classify() error = %v", err)
+	}
+	if client.config.ThinkingConfig == nil || client.config.ThinkingConfig.ThinkingLevel != minimalThinking {
+		t.Fatalf("Gemini 3 thinking level = %+v, want minimal", client.config.ThinkingConfig)
 	}
 }
 
@@ -118,7 +135,7 @@ func TestGeminiProviderReportsMissingConfigurationAndProviderErrors(t *testing.T
 		t.Fatalf("NewGeminiProvider() error = %v, want missing-configuration error", err)
 	}
 
-	secret := "must-not-appear-in-logs"
+	secret := "AIza0123456789012345678901234567890123"
 	provider := newGeminiProviderWithClient(&fakeGeminiClient{
 		err: errors.New(secret),
 	}, "", time.Second)
@@ -130,13 +147,75 @@ func TestGeminiProviderReportsMissingConfigurationAndProviderErrors(t *testing.T
 		t.Fatalf("provider error exposed sensitive information: %v", err)
 	}
 
-	provider = newGeminiProviderWithClient(&fakeGeminiClient{
-		err: genai.APIError{Code: 429, Message: secret},
-	}, "", time.Second)
+	provider = &GeminiProvider{
+		client:  &fakeGeminiClient{err: genai.APIError{Code: 429, Message: secret}},
+		model:   defaultGeminiModel,
+		apiKey:  secret,
+		timeout: time.Second,
+	}
 	_, err = provider.Classify(context.Background(), feedback.Feedback{Content: "Review"})
 	if err == nil || !strings.Contains(err.Error(), "HTTP 429") || strings.Contains(err.Error(), secret) {
 		t.Fatalf("Gemini API error = %v, want sanitized HTTP 429", err)
 	}
+}
+
+func TestGeminiProviderClassifiesUpstreamHTTPFailures(t *testing.T) {
+	for _, test := range []struct {
+		status    int
+		retryable bool
+	}{
+		{status: 503, retryable: true},
+		{status: 504, retryable: true},
+		{status: 401, retryable: false},
+		{status: 400, retryable: false},
+	} {
+		status := test.status
+		t.Run(fmt.Sprintf("HTTP_%d", status), func(t *testing.T) {
+			reviewText := "Sensitive review content"
+			provider := newGeminiProviderWithClient(&fakeGeminiClient{
+				err: genai.APIError{Code: status, Message: "temporary failure " + reviewText},
+			}, "test-model", time.Second)
+			_, err := provider.Classify(context.Background(), feedback.Feedback{Content: reviewText})
+			var providerFailure *ProviderFailure
+			if !errors.As(err, &providerFailure) || providerFailure.Status != status || providerFailure.IsRetryable() != test.retryable {
+				t.Fatalf("Classify() error = %v, want upstream HTTP %d (retryable=%t)", err, status, test.retryable)
+			}
+			if strings.Contains(err.Error(), reviewText) {
+				t.Fatalf("provider error exposed review content: %v", err)
+			}
+		})
+	}
+}
+
+func TestGeminiProviderDistinguishesDeadlineAndNetworkTimeout(t *testing.T) {
+	t.Run("context deadline", func(t *testing.T) {
+		client := &fakeGeminiClient{
+			generate: func(ctx context.Context, _ string, _ []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}
+		provider := newGeminiProviderWithClient(client, "test-model", time.Millisecond)
+		_, err := provider.Classify(context.Background(), feedback.Feedback{Content: "Review"})
+		var providerFailure *ProviderFailure
+		if !errors.As(err, &providerFailure) || providerFailure.Kind != "deadline exceeded" || !providerFailure.IsRetryable() {
+			t.Fatalf("Classify() error = %v, want retryable local deadline", err)
+		}
+	})
+
+	t.Run("network timeout", func(t *testing.T) {
+		client := &fakeGeminiClient{
+			generate: func(context.Context, string, []*genai.Content, *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+				return nil, &net.DNSError{Err: "lookup timeout", IsTimeout: true, IsTemporary: true}
+			},
+		}
+		provider := newGeminiProviderWithClient(client, "test-model", time.Second)
+		_, err := provider.Classify(context.Background(), feedback.Feedback{Content: "Review"})
+		var providerFailure *ProviderFailure
+		if !errors.As(err, &providerFailure) || providerFailure.Kind != "network error" || !providerFailure.IsRetryable() {
+			t.Fatalf("Classify() error = %v, want retryable network timeout", err)
+		}
+	})
 }
 
 func TestGeminiProviderSmoke(t *testing.T) {
@@ -151,7 +230,7 @@ func TestGeminiProviderSmoke(t *testing.T) {
 	if model == "" {
 		model = defaultGeminiModel
 	}
-	provider, err := NewGeminiProvider(apiKey, model, 30*time.Second)
+	provider, err := NewGeminiProvider(apiKey, model, 90*time.Second)
 	if err != nil {
 		t.Fatalf("initialize Gemini provider: %v", err)
 	}

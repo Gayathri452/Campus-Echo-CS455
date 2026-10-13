@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,8 +61,27 @@ func (repository *memoryReviewRepository) ClaimForTriage(_ context.Context, id s
 	if review.Status != feedback.StatusSubmitted || time.Now().Before(repository.leases[id]) {
 		return feedback.Feedback{}, false, nil
 	}
+	review.TriageAttempts++
 	repository.leases[id] = time.Now().Add(lease)
+	repository.reviews[id] = review
 	return review, true, nil
+}
+
+func (repository *memoryReviewRepository) MarkTriageFailed(_ context.Context, id, reason string) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	review, exists := repository.reviews[id]
+	if !exists {
+		return feedback.ErrReviewNotFound
+	}
+	if review.Status != feedback.StatusSubmitted {
+		return feedback.ErrReviewNotEligible
+	}
+	review.Status = feedback.StatusTriageFailed
+	review.ProcessingError = reason
+	repository.reviews[id] = review
+	delete(repository.leases, id)
+	return nil
 }
 
 func (repository *memoryReviewRepository) ReleaseTriage(_ context.Context, id string) error {
@@ -296,6 +316,114 @@ func TestAsyncDispatchDoesNotWaitForSlowProviderAndRetries(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("provider calls = %d, want retry call count 2", calls)
 	}
+}
+
+func TestRetriesPersistMonotonicAttemptCountAndEventuallyPublish(t *testing.T) {
+	review := testReview("review-1", "CS455", "The exam was unfair and too difficult.", time.Now())
+	repository := newMemoryReviewRepository(review)
+	var attempts []int
+	var attemptsMu sync.Mutex
+	provider := providerFunc(func(_ context.Context, review feedback.Feedback) (AIResult, error) {
+		attemptsMu.Lock()
+		attempts = append(attempts, review.TriageAttempts)
+		call := len(attempts)
+		attemptsMu.Unlock()
+		if call < 3 {
+			return AIResult{}, errors.New("temporary provider failure")
+		}
+		return AIResult{Decision: DecisionPublish}, nil
+	})
+	service := serviceForTest(repository, provider, WithRetryBackoff(time.Millisecond), WithMaxRetries(2))
+	service.Start(context.Background())
+	defer service.Stop()
+	if err := service.Dispatch(context.Background(), review.ID); err != nil {
+		t.Fatalf("dispatch review: %v", err)
+	}
+	waitForStatus(t, repository, review.ID, feedback.StatusPublished)
+
+	attemptsMu.Lock()
+	defer attemptsMu.Unlock()
+	if fmt.Sprint(attempts) != "[1 2 3]" {
+		t.Fatalf("provider attempts = %v, want [1 2 3]", attempts)
+	}
+	stored, err := repository.FindByID(context.Background(), review.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.TriageAttempts != 3 {
+		t.Fatalf("persisted attempts = %d, want 3", stored.TriageAttempts)
+	}
+}
+
+func TestRetryExhaustionPersistsFailureWithoutPublishing(t *testing.T) {
+	review := testReview("review-1", "CS455", "Review that cannot be classified.", time.Now())
+	repository := newMemoryReviewRepository(review)
+	var calls atomic.Int32
+	service := serviceForTest(repository, providerFunc(func(context.Context, feedback.Feedback) (AIResult, error) {
+		calls.Add(1)
+		return AIResult{}, errors.New("temporary provider failure")
+	}), WithRetryBackoff(time.Millisecond), WithMaxRetries(2))
+	service.Start(context.Background())
+	defer service.Stop()
+	if err := service.Dispatch(context.Background(), review.ID); err != nil {
+		t.Fatalf("dispatch review: %v", err)
+	}
+	waitForStatus(t, repository, review.ID, feedback.StatusTriageFailed)
+	stored, err := repository.FindByID(context.Background(), review.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status == feedback.StatusPublished || stored.TriageAttempts != 3 ||
+		stored.ProcessingError != feedback.ProcessingFailureMessage || calls.Load() != 3 {
+		t.Fatalf("exhausted review state = %+v, provider calls = %d", stored, calls.Load())
+	}
+}
+
+func TestBackoffIsExponentialCappedAndJittered(t *testing.T) {
+	tests := []struct {
+		attempt int
+		lower   time.Duration
+		upper   time.Duration
+	}{
+		{attempt: 1, lower: 50 * time.Millisecond, upper: 100 * time.Millisecond},
+		{attempt: 2, lower: 100 * time.Millisecond, upper: 200 * time.Millisecond},
+		{attempt: 3, lower: 200 * time.Millisecond, upper: 400 * time.Millisecond},
+		{attempt: 20, lower: 15 * time.Second, upper: 30 * time.Second},
+	}
+	for _, test := range tests {
+		delay := backoffDelay(100*time.Millisecond, test.attempt)
+		if delay < test.lower || delay > test.upper {
+			t.Errorf("backoff attempt %d = %s, want [%s, %s]", test.attempt, delay, test.lower, test.upper)
+		}
+	}
+}
+
+func TestConcurrentServicesCannotClaimReviewTwice(t *testing.T) {
+	review := testReview("review-1", "CS455", "One review.", time.Now())
+	repository := newMemoryReviewRepository(review)
+	var calls atomic.Int32
+	provider := providerFunc(func(context.Context, feedback.Feedback) (AIResult, error) {
+		calls.Add(1)
+		time.Sleep(10 * time.Millisecond)
+		return AIResult{Decision: DecisionPublish}, nil
+	})
+	first := serviceForTest(repository, provider)
+	second := serviceForTest(repository, provider)
+	var done sync.WaitGroup
+	done.Add(2)
+	go func() {
+		defer done.Done()
+		_ = first.ProcessReview(context.Background(), review.ID)
+	}()
+	go func() {
+		defer done.Done()
+		_ = second.ProcessReview(context.Background(), review.ID)
+	}()
+	done.Wait()
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("classifier calls = %d, want one atomic lease claim", got)
+	}
+	assertReviewState(t, repository, review.ID, feedback.StatusPublished, "")
 }
 
 func TestStartupRecoveryProcessesPersistedSubmittedReview(t *testing.T) {

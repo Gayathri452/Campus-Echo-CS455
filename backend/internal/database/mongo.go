@@ -26,32 +26,36 @@ type Mongo struct {
 }
 
 type feedbackRecord struct {
-	ID            primitive.ObjectID `bson:"_id"`
-	ReferenceCode string             `bson:"referenceCode"`
-	CourseID      string             `bson:"courseId"`
-	CourseTitle   string             `bson:"courseTitle"`
-	Category      string             `bson:"category"`
-	Rating        int                `bson:"rating"`
-	Content       string             `bson:"content"`
-	Status        string             `bson:"status"`
-	FlagReason    string             `bson:"flagReason,omitempty"`
-	CreatedAt     time.Time          `bson:"createdAt"`
-	PublishedAt   *time.Time         `bson:"publishedAt,omitempty"`
+	ID              primitive.ObjectID `bson:"_id"`
+	ReferenceCode   string             `bson:"referenceCode"`
+	CourseID        string             `bson:"courseId"`
+	CourseTitle     string             `bson:"courseTitle"`
+	Category        string             `bson:"category"`
+	Rating          int                `bson:"rating"`
+	Content         string             `bson:"content"`
+	Status          string             `bson:"status"`
+	FlagReason      string             `bson:"flagReason,omitempty"`
+	ProcessingError string             `bson:"processingError,omitempty"`
+	TriageAttempts  int                `bson:"triageAttempts,omitempty"`
+	CreatedAt       time.Time          `bson:"createdAt"`
+	PublishedAt     *time.Time         `bson:"publishedAt,omitempty"`
 }
 
 func (r feedbackRecord) feedback() feedback.Feedback {
 	return feedback.Feedback{
-		ID:            r.ID.Hex(),
-		ReferenceCode: r.ReferenceCode,
-		CourseID:      r.CourseID,
-		CourseTitle:   r.CourseTitle,
-		Category:      r.Category,
-		Rating:        r.Rating,
-		Content:       r.Content,
-		Status:        r.Status,
-		FlagReason:    r.FlagReason,
-		CreatedAt:     r.CreatedAt,
-		PublishedAt:   r.PublishedAt,
+		ID:              r.ID.Hex(),
+		ReferenceCode:   r.ReferenceCode,
+		CourseID:        r.CourseID,
+		CourseTitle:     r.CourseTitle,
+		Category:        r.Category,
+		Rating:          r.Rating,
+		Content:         r.Content,
+		Status:          r.Status,
+		FlagReason:      r.FlagReason,
+		ProcessingError: r.ProcessingError,
+		TriageAttempts:  r.TriageAttempts,
+		CreatedAt:       r.CreatedAt,
+		PublishedAt:     r.PublishedAt,
 	}
 }
 
@@ -378,8 +382,7 @@ func (m *Mongo) Create(ctx context.Context, input feedback.CreateInput) (feedbac
 		"category":      input.Category,
 		"rating":        input.Rating,
 		"content":       input.Content,
-		"status":        feedback.StatusFlagged,
-		"flagReason":    feedback.FlagReasonReview,
+		"status":        feedback.StatusSubmitted,
 		"createdAt":     now,
 	}
 
@@ -401,8 +404,7 @@ func (m *Mongo) Create(ctx context.Context, input feedback.CreateInput) (feedbac
 		Category:      input.Category,
 		Rating:        input.Rating,
 		Content:       input.Content,
-		Status:        feedback.StatusFlagged,
-		FlagReason:    feedback.FlagReasonReview,
+		Status:        feedback.StatusSubmitted,
 		CreatedAt:     now,
 	}, nil
 }
@@ -481,14 +483,31 @@ func (m *Mongo) CourseRatings(ctx context.Context, courseID string) ([]feedback.
 }
 
 func (m *Mongo) FindByReference(ctx context.Context, referenceCode string) (feedback.Feedback, error) {
-	var result feedbackRecord
-	if err := m.feedbackCollection.FindOne(ctx, bson.M{"referenceCode": referenceCode}).Decode(&result); err != nil {
+	var record feedbackRecord
+	if err := m.feedbackCollection.FindOne(ctx, bson.M{"referenceCode": referenceCode}).Decode(&record); err != nil {
 		if err == mongo.ErrNoDocuments {
 			return feedback.Feedback{}, feedback.ErrReviewNotFound
 		}
 		return feedback.Feedback{}, fmt.Errorf("find feedback by reference: %w", err)
 	}
-	return result.feedback(), nil
+	result := record.feedback()
+	if result.Status == feedback.StatusFlagged && result.FlagReason == "" {
+		result.FlagReason = feedback.FlagReasonReview
+	}
+
+	var appeal struct {
+		Status            string `bson:"status"`
+		ResolutionComment string `bson:"resolutionComment"`
+	}
+	err := m.appealCollection.FindOne(ctx, bson.M{"referenceCode": referenceCode}).Decode(&appeal)
+	if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
+		return feedback.Feedback{}, fmt.Errorf("find appeal by review reference: %w", err)
+	}
+	if err == nil {
+		result.AppealStatus = appeal.Status
+		result.AppealResolutionComment = appeal.ResolutionComment
+	}
+	return result, nil
 }
 
 func (m *Mongo) FindByID(ctx context.Context, id string) (feedback.Feedback, error) {
@@ -523,7 +542,11 @@ func (m *Mongo) ClaimForTriage(ctx context.Context, id string, lease time.Durati
 				{"triageLeaseUntil": bson.M{"$lte": now}},
 			},
 		},
-		bson.M{"$set": bson.M{"triageLeaseUntil": now.Add(lease)}},
+		bson.M{
+			"$set":   bson.M{"triageLeaseUntil": now.Add(lease)},
+			"$inc":   bson.M{"triageAttempts": 1},
+			"$unset": bson.M{"processingError": ""},
+		},
 		options.FindOneAndUpdate().SetReturnDocument(options.After),
 	).Decode(&record)
 	if err != nil {
@@ -571,10 +594,33 @@ func (m *Mongo) UpdateStatus(ctx context.Context, id, status, reason string) err
 	} else {
 		unset["publishedAt"] = ""
 	}
+	unset["processingError"] = ""
 	update := bson.M{"$set": set, "$unset": unset}
 	result, err := m.feedbackCollection.UpdateOne(ctx, bson.M{"_id": objectID, "status": feedback.StatusSubmitted}, update)
 	if err != nil {
 		return fmt.Errorf("update review status: %w", err)
+	}
+	if result.MatchedCount == 0 {
+		return feedback.ErrReviewNotEligible
+	}
+	return nil
+}
+
+func (m *Mongo) MarkTriageFailed(ctx context.Context, id, reason string) error {
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return fmt.Errorf("parse review ID for triage failure: %w", err)
+	}
+	result, err := m.feedbackCollection.UpdateOne(
+		ctx,
+		bson.M{"_id": objectID, "status": feedback.StatusSubmitted},
+		bson.M{
+			"$set":   bson.M{"status": feedback.StatusTriageFailed, "processingError": reason},
+			"$unset": bson.M{"triageLeaseUntil": ""},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("mark review triage failed: %w", err)
 	}
 	if result.MatchedCount == 0 {
 		return feedback.ErrReviewNotEligible
@@ -667,21 +713,6 @@ func (m *Mongo) ListRecentByCourse(ctx context.Context, courseID string, limit i
 	result := make([]feedback.Feedback, 0, len(docs))
 	for i := range docs {
 		result = append(result, docs[i].feedback())
-	if result.Status == feedback.StatusFlagged && result.FlagReason == "" {
-		result.FlagReason = feedback.FlagReasonReview
-	}
-
-	var appeal struct {
-		Status            string `bson:"status"`
-		ResolutionComment string `bson:"resolutionComment"`
-	}
-	err := m.appealCollection.FindOne(ctx, bson.M{"referenceCode": referenceCode}).Decode(&appeal)
-	if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
-		return feedback.Feedback{}, fmt.Errorf("find appeal by review reference: %w", err)
-	}
-	if err == nil {
-		result.AppealStatus = appeal.Status
-		result.AppealResolutionComment = appeal.ResolutionComment
 	}
 	return result, nil
 }

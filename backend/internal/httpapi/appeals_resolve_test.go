@@ -64,7 +64,7 @@ func newResolveTestHandler(t *testing.T, store *resolveTestStore) (http.Handler,
 	t.Helper()
 	repository := newMemoryAuthRepository()
 	authService := auth.NewService(repository)
-	session, err := authService.RegisterStudent(context.Background(), "moderator@college.edu", "long-secure-password")
+	session, err := authService.RegisterStudent(context.Background(), "moderator@iitk.ac.in", "long-secure-password")
 	if err != nil {
 		t.Fatal(err)
 	}

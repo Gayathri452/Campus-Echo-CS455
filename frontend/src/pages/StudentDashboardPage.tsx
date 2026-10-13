@@ -26,6 +26,7 @@ const statusLabel: Record<string, string> = {
   rejected: "Rejected",
   published: "Published",
   deleted: "Removed",
+  triage_failed: "Moderation needs attention",
 };
 
 function StudentDashboardPage({ session, onLogout }: StudentDashboardPageProps) {
@@ -473,6 +474,11 @@ function StatusCard({ review, accessToken, onRefresh }: { review: FeedbackRespon
       {review.flagReason && (
         <p className="mt-5 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900">
           <strong>Flag reason:</strong> {review.flagReason}
+        </p>
+      )}
+      {review.status === "triage_failed" && (
+        <p className="mt-5 rounded-lg bg-rose-50 px-4 py-3 text-sm text-rose-800" role="status">
+          {review.processingError ?? "Automatic moderation could not complete. Please contact support."}
         </p>
       )}
       <p className="mt-5 text-sm leading-7 text-ink/65">{review.content}</p>

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/rand"
 	"sort"
 	"strings"
 	"sync"
@@ -81,6 +82,10 @@ type ReviewRepository interface {
 	ListSubmitted(ctx context.Context, limit int) ([]feedback.Feedback, error)
 }
 
+type triageFailureRepository interface {
+	MarkTriageFailed(ctx context.Context, id, reason string) error
+}
+
 type Dispatcher interface {
 	Dispatch(context.Context, string) error
 }
@@ -90,23 +95,35 @@ type Job struct {
 	Attempt  int
 }
 
+type JobFailure struct {
+	Attempt   int
+	Retryable bool
+	Err       error
+}
+
+func (e *JobFailure) Error() string { return e.Err.Error() }
+func (e *JobFailure) Unwrap() error { return e.Err }
+
 type WorkerPool struct {
-	jobs     chan Job
-	cancel   context.CancelFunc
-	fn       func(context.Context, Job) error
-	backoff  time.Duration
-	maxRetry int
-	wg       sync.WaitGroup
-	stopOnce sync.Once
-	mu       sync.RWMutex
-	stopped  bool
+	jobs         chan Job
+	cancel       context.CancelFunc
+	fn           func(context.Context, Job) error
+	backoff      time.Duration
+	maxRetry     int
+	prepareRetry func(Job)
+	enqueueRetry func(context.Context, Job) error
+	onFailure    func(context.Context, Job, error)
+	wg           sync.WaitGroup
+	stopOnce     sync.Once
+	mu           sync.RWMutex
+	stopped      bool
 }
 
 func NewWorkerPool(size, queueSize int, backoff time.Duration, maxRetry int, fn func(context.Context, Job) error) *WorkerPool {
-	return newWorkerPool(context.Background(), size, queueSize, backoff, maxRetry, fn)
+	return newWorkerPool(context.Background(), size, queueSize, backoff, maxRetry, fn, nil, nil, nil)
 }
 
-func newWorkerPool(parent context.Context, size, queueSize int, backoff time.Duration, maxRetry int, fn func(context.Context, Job) error) *WorkerPool {
+func newWorkerPool(parent context.Context, size, queueSize int, backoff time.Duration, maxRetry int, fn func(context.Context, Job) error, prepareRetry func(Job), enqueueRetry func(context.Context, Job) error, onFailure func(context.Context, Job, error)) *WorkerPool {
 	if size <= 0 {
 		size = DefaultWorkers
 	}
@@ -121,11 +138,14 @@ func newWorkerPool(parent context.Context, size, queueSize int, backoff time.Dur
 	}
 	ctx, cancel := context.WithCancel(parent)
 	pool := &WorkerPool{
-		jobs:     make(chan Job, queueSize),
-		cancel:   cancel,
-		fn:       fn,
-		backoff:  backoff,
-		maxRetry: maxRetry,
+		jobs:         make(chan Job, queueSize),
+		cancel:       cancel,
+		fn:           fn,
+		backoff:      backoff,
+		maxRetry:     maxRetry,
+		prepareRetry: prepareRetry,
+		enqueueRetry: enqueueRetry,
+		onFailure:    onFailure,
 	}
 	for i := 0; i < size; i++ {
 		pool.wg.Add(1)
@@ -163,18 +183,39 @@ func (p *WorkerPool) worker(ctx context.Context) {
 			return
 		case job := <-p.jobs:
 			if err := p.fn(ctx, job); err != nil {
-				log.Printf("triage processing failed: review_id=%s attempt=%d error=%v", job.ReviewID, job.Attempt+1, err)
-				if job.Attempt < p.maxRetry {
-					retry := job
-					retry.Attempt++
+				attempt := job.Attempt + 1
+				retryable := true
+				var failure *JobFailure
+				if errors.As(err, &failure) {
+					attempt = failure.Attempt
+					retryable = failure.Retryable
+				}
+				log.Printf("triage processing failed: review_id=%s attempt=%d retryable=%t error=%v", job.ReviewID, attempt, retryable, err)
+				if ctx.Err() != nil {
+					continue
+				}
+				if retryable && attempt <= p.maxRetry {
+					retry := Job{ReviewID: job.ReviewID, Attempt: attempt}
+					if p.prepareRetry != nil {
+						p.prepareRetry(retry)
+					}
 					if err := waitBackoff(ctx, p.backoff, retry.Attempt); err != nil {
 						return
 					}
-					if err := p.Enqueue(ctx, retry); err != nil && !errors.Is(err, ErrQueueFull) {
+					enqueue := p.enqueueRetry
+					if enqueue == nil {
+						enqueue = p.Enqueue
+					}
+					if err := enqueue(ctx, retry); err != nil && !errors.Is(err, ErrQueueFull) {
+						if p.onFailure != nil {
+							p.onFailure(ctx, retry, err)
+						}
 						log.Printf("triage retry could not be queued: review_id=%s error=%v", job.ReviewID, err)
 					} else if errors.Is(err, ErrQueueFull) {
 						log.Printf("triage retry deferred to pending-review recovery: review_id=%s", job.ReviewID)
 					}
+				} else if p.onFailure != nil {
+					p.onFailure(ctx, Job{ReviewID: job.ReviewID, Attempt: attempt}, err)
 				}
 			}
 		}
@@ -182,14 +223,7 @@ func (p *WorkerPool) worker(ctx context.Context) {
 }
 
 func waitBackoff(ctx context.Context, base time.Duration, attempt int) error {
-	delay := base
-	for i := 1; i < attempt && delay < 30*time.Second; i++ {
-		delay *= 2
-	}
-	if delay > 30*time.Second {
-		delay = 30 * time.Second
-	}
-	timer := time.NewTimer(delay)
+	timer := time.NewTimer(backoffDelay(base, attempt))
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -197,6 +231,21 @@ func waitBackoff(ctx context.Context, base time.Duration, attempt int) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func backoffDelay(base time.Duration, attempt int) time.Duration {
+	delay := base
+	for i := 1; i < attempt && delay < 30*time.Second; i++ {
+		delay *= 2
+	}
+	if delay > 30*time.Second {
+		delay = 30 * time.Second
+	}
+	jitter := delay / 2
+	if jitter > 0 {
+		delay = delay/2 + time.Duration(rand.Int63n(int64(jitter)+1))
+	}
+	return delay
 }
 
 func (p *WorkerPool) Stop() {
@@ -338,7 +387,7 @@ func (s *Service) Start(ctx context.Context) {
 	}
 	serviceCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
-	s.workerPool = newWorkerPool(serviceCtx, s.workers, s.queueSize, s.retryBackoff, s.maxRetries, s.processJob)
+	s.workerPool = newWorkerPool(serviceCtx, s.workers, s.queueSize, s.retryBackoff, s.maxRetries, s.processJob, s.prepareRetry, s.enqueueRetry, s.failReview)
 	s.started = true
 	s.recoveryWG.Add(1)
 	s.mu.Unlock()
@@ -369,6 +418,11 @@ func (s *Service) Stop() {
 }
 
 func (s *Service) Dispatch(ctx context.Context, reviewID string) error {
+	return s.dispatchJob(ctx, Job{ReviewID: reviewID})
+}
+
+func (s *Service) dispatchJob(ctx context.Context, job Job) error {
+	reviewID := job.ReviewID
 	if reviewID == "" {
 		return ErrReviewNotFound
 	}
@@ -389,7 +443,7 @@ func (s *Service) Dispatch(ctx context.Context, reviewID string) error {
 	pool := s.workerPool
 	s.mu.Unlock()
 
-	if err := pool.Enqueue(ctx, Job{ReviewID: reviewID}); err != nil {
+	if err := pool.Enqueue(ctx, job); err != nil {
 		s.mu.Lock()
 		delete(s.queued, reviewID)
 		s.mu.Unlock()
@@ -426,7 +480,11 @@ func (s *Service) scanPending(ctx context.Context) {
 		return
 	}
 	for _, review := range reviews {
-		if err := s.Dispatch(ctx, review.ID); err != nil {
+		if review.TriageAttempts >= s.maxRetries+1 {
+			s.failReview(ctx, Job{ReviewID: review.ID, Attempt: review.TriageAttempts}, errors.New("maximum triage attempts already reached"))
+			continue
+		}
+		if err := s.dispatchJob(ctx, Job{ReviewID: review.ID, Attempt: review.TriageAttempts}); err != nil {
 			if ctx.Err() == nil && !errors.Is(err, ErrQueueFull) {
 				log.Printf("triage pending review could not be queued: review_id=%s error=%v", review.ID, err)
 			}
@@ -457,10 +515,14 @@ func (s *Service) processJob(parent context.Context, job Job) error {
 	defer cancel()
 	review, claimed, err := s.store.ClaimForTriage(ctx, job.ReviewID, s.leaseDuration)
 	if err != nil {
-		return err
+		return &JobFailure{Attempt: job.Attempt + 1, Retryable: true, Err: err}
 	}
 	if !claimed {
 		return nil
+	}
+	attempt := job.Attempt + 1
+	if review.TriageAttempts > attempt {
+		attempt = review.TriageAttempts
 	}
 	defer func() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -472,47 +534,107 @@ func (s *Service) processJob(parent context.Context, job Job) error {
 
 	result, err := s.provider.Classify(ctx, review)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrClassifierFailed, err)
+		retryable := true
+		var providerFailure interface{ IsRetryable() bool }
+		if errors.As(err, &providerFailure) {
+			retryable = providerFailure.IsRetryable()
+		}
+		return &JobFailure{
+			Attempt:   attempt,
+			Retryable: retryable,
+			Err:       fmt.Errorf("%w: %w", ErrClassifierFailed, err),
+		}
 	}
 	result.Decision = strings.ToLower(strings.TrimSpace(result.Decision))
 	if result.Decision != DecisionPublish && result.Decision != DecisionFlag {
-		return fmt.Errorf("%w: provider returned an unsupported decision", ErrInvalidDecision)
+		return &JobFailure{Attempt: attempt, Err: fmt.Errorf("%w: provider returned an unsupported decision", ErrInvalidDecision)}
 	}
 
 	if result.Decision == DecisionFlag {
 		reason, err := formatFlagReason(result)
 		if err != nil {
-			return err
+			return &JobFailure{Attempt: attempt, Err: err}
 		}
-		return s.store.UpdateStatus(ctx, review.ID, feedback.StatusFlagged, reason)
+		if err := s.store.UpdateStatus(ctx, review.ID, feedback.StatusFlagged, reason); err != nil {
+			return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
+		}
+		return nil
 	}
 
 	recent, err := s.store.ListRecentByCourse(ctx, review.CourseID, 100)
 	if err != nil {
-		return err
+		return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
 	}
 	duplicate, err := s.duplicateDetector.Detect(ctx, review, recent)
 	if err != nil {
-		return err
+		return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
 	}
 	if duplicate.IsDuplicate {
-		return s.store.UpdateStatus(ctx, review.ID, feedback.StatusFlagged, duplicate.Explanation)
+		if err := s.store.UpdateStatus(ctx, review.ID, feedback.StatusFlagged, duplicate.Explanation); err != nil {
+			return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
+		}
+		return nil
 	}
 	if s.brigadingChecker == nil {
-		return ErrBrigadingUnavailable
+		return &JobFailure{Attempt: attempt, Err: ErrBrigadingUnavailable}
 	}
 	check, err := s.brigadingChecker.Check(ctx, review, recent)
 	if err != nil {
-		return fmt.Errorf("brigading check: %w", err)
+		return &JobFailure{Attempt: attempt, Retryable: true, Err: fmt.Errorf("brigading check: %w", err)}
 	}
 	if check.Detected {
 		if strings.TrimSpace(check.Reason) == "" {
-			return errors.New("brigading checker returned a detection without a reason")
+			return &JobFailure{Attempt: attempt, Err: errors.New("brigading checker returned a detection without a reason")}
 		}
 		ids := uniqueReviewIDs(check.ReviewIDs, review.ID)
-		return s.store.FlagReviews(ctx, ids, check.Reason)
+		if err := s.store.FlagReviews(ctx, ids, check.Reason); err != nil {
+			return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
+		}
+		return nil
 	}
-	return s.store.UpdateStatus(ctx, review.ID, feedback.StatusPublished, "")
+	if err := s.store.UpdateStatus(ctx, review.ID, feedback.StatusPublished, ""); err != nil {
+		return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
+	}
+	return nil
+}
+
+func (s *Service) prepareRetry(job Job) {
+	s.mu.Lock()
+	s.queued[job.ReviewID] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *Service) enqueueRetry(ctx context.Context, job Job) error {
+	s.mu.Lock()
+	pool := s.workerPool
+	stopping := s.stopping
+	s.mu.Unlock()
+	if pool == nil || stopping {
+		return ErrServiceNotStarted
+	}
+	if err := pool.Enqueue(ctx, job); err != nil {
+		s.mu.Lock()
+		delete(s.queued, job.ReviewID)
+		s.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func (s *Service) failReview(ctx context.Context, job Job, cause error) {
+	if ctx.Err() != nil {
+		return
+	}
+	repository, ok := s.store.(triageFailureRepository)
+	if !ok {
+		log.Printf("triage failure state unavailable: review_id=%s attempt=%d error=%v", job.ReviewID, job.Attempt, cause)
+		return
+	}
+	failureCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := repository.MarkTriageFailed(failureCtx, job.ReviewID, feedback.ProcessingFailureMessage); err != nil {
+		log.Printf("could not persist terminal triage failure: review_id=%s attempt=%d error=%v", job.ReviewID, job.Attempt, err)
+	}
 }
 
 func formatFlagReason(result AIResult) (string, error) {
