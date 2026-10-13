@@ -1,5 +1,9 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import type { AuthSession } from "../services/auth";
+import AnnouncementsPanel from "./student/AnnouncementsPanel";
+import { COURSE_LIST_ID, CourseOptions, CourseTitleAutofill } from "./student/CourseSuggestions";
+import ReferenceNotebookPage from "./student/ReferenceNotebookPage";
+import SaveToNotebook from "./student/SaveToNotebook";
 import {
   createAppeal,
   exploreFeedback,
@@ -9,7 +13,7 @@ import {
   type FeedbackResponse,
 } from "../services/feedback";
 
-type StudentView = "home" | "submit" | "explore" | "status";
+type StudentView = "home" | "submit" | "explore" | "status" | "codes";
 
 interface StudentDashboardPageProps {
   session: AuthSession;
@@ -42,6 +46,7 @@ function StudentDashboardPage({ session, onLogout }: StudentDashboardPageProps) 
             <NavButton active={view === "home"} onClick={() => navigate("home")}>Overview</NavButton>
             <NavButton active={view === "submit"} onClick={() => navigate("submit")}>Submit review</NavButton>
             <NavButton active={view === "explore"} onClick={() => navigate("explore")}>Explore reviews</NavButton>
+            <NavButton active={view === "codes"} onClick={() => navigate("codes")}>My codes</NavButton>
             <NavButton active={view === "status"} onClick={() => navigate("status")}>Track status</NavButton>
             <button className="rounded-lg border border-ink/15 px-4 py-2 text-sm font-semibold hover:bg-mist" onClick={onLogout} type="button">
               Sign out
@@ -51,9 +56,12 @@ function StudentDashboardPage({ session, onLogout }: StudentDashboardPageProps) 
       </header>
 
       <div className="mx-auto max-w-5xl px-6 py-10">
+        {view === "home" && <AnnouncementsPanel accessToken={session.accessToken} ownerId={session.user.id} />}
         {view === "home" && <DashboardHome onNavigate={navigate} />}
         {view === "submit" && <SubmitReview accessToken={session.accessToken} onComplete={() => navigate("status")} />}
         {view === "explore" && <ExploreReviews accessToken={session.accessToken} />}
+        {view === "codes" && <ReferenceNotebookPage accessToken={session.accessToken} onTrack={() => navigate("status")} ownerId={session.user.id} />}
+        <CourseOptions accessToken={session.accessToken} />
         {view === "status" && <ReviewStatus accessToken={session.accessToken} />}
       </div>
     </main>
@@ -123,6 +131,7 @@ function SubmitReview({ accessToken, onComplete }: { accessToken?: string; onCom
             {result.referenceCode}
           </p>
         </div>
+        <SaveToNotebook accessToken={accessToken} courseId={result.courseId} courseTitle={result.courseTitle} referenceCode={result.referenceCode} status={result.status} />
         <div className="mt-6 flex flex-wrap gap-3">
           <button className="rounded-lg bg-ocean px-4 py-2 text-sm font-semibold text-white hover:bg-ocean/90" onClick={onComplete} type="button">Track this review</button>
           <button className="rounded-lg border border-ink/15 px-4 py-2 text-sm font-semibold hover:bg-mist" onClick={() => setResult(null)} type="button">Submit another review</button>
@@ -144,12 +153,13 @@ function SubmitReview({ accessToken, onComplete }: { accessToken?: string; onCom
       >
         <div className="grid gap-5 sm:grid-cols-2">
           <Field label="Course ID">
-            <input className="input" placeholder="CS455" value={form.courseId} onChange={(event) => setField("courseId", event.target.value)} />
+            <input className="input" autoComplete="off" list={COURSE_LIST_ID} placeholder="CS455" value={form.courseId} onChange={(event) => setField("courseId", event.target.value)} />
           </Field>
           <Field label="Course title">
             <input className="input" placeholder="Software Engineering" value={form.courseTitle} onChange={(event) => setField("courseTitle", event.target.value)} />
           </Field>
         </div>
+        <CourseTitleAutofill accessToken={accessToken} courseId={form.courseId} courseTitle={form.courseTitle} onFill={(title) => setField("courseTitle", title)} />
         <Field label="Category">
           <select className="input" value={form.category} onChange={(event) => setField("category", event.target.value)}>
             {reviewCategories.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}
@@ -189,7 +199,7 @@ function ExploreReviews({ accessToken }: { accessToken?: string }) {
   const [isLoading, setIsLoading] = useState(true);
   async function loadReviews() { setIsLoading(true); setError(""); try { setReviews(await exploreFeedback(filters, accessToken)); } catch (loadError: unknown) { setError(loadError instanceof Error ? loadError.message : "Could not load reviews."); } finally { setIsLoading(false); } }
   useEffect(() => { void loadReviews(); }, []);
-  return <section><PageHeading eyebrow="Published feedback" title="Explore reviews" description="Search feedback that has completed the publication workflow." /><form className="mt-6 grid gap-3 rounded-xl border border-ink/10 bg-white p-6 shadow-sm md:grid-cols-[1.5fr_1fr_1fr_0.7fr_auto]" onSubmit={(event) => { event.preventDefault(); void loadReviews(); }}><input className="input" placeholder="Search course or feedback" value={filters.search} onChange={(event) => setFilters({ ...filters, search: event.target.value })} /><input className="input" placeholder="Course ID" value={filters.courseId} onChange={(event) => setFilters({ ...filters, courseId: event.target.value })} /><select className="input" value={filters.category} onChange={(event) => setFilters({ ...filters, category: event.target.value })}><option value="">All categories</option>{reviewCategories.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}</select><select className="input" value={filters.rating} onChange={(event) => setFilters({ ...filters, rating: event.target.value })}><option value="">Any rating</option>{[1, 2, 3, 4, 5].map((rating) => <option key={rating} value={rating}>{rating} / 5</option>)}</select><button className="rounded-lg bg-ocean px-4 py-2 text-sm font-semibold text-white hover:bg-ocean/90" type="submit">Search</button></form>{error && <p className="mt-5 rounded-lg bg-rose-50 px-4 py-3 text-sm text-rose-800" role="alert">{error}</p>}{isLoading ? <LoadingState /> : reviews.length === 0 ? <EmptyState title="No published reviews yet" text="Try a different filter or check back after the review workflow publishes new feedback." /> : <div className="mt-6 grid gap-4 lg:grid-cols-2">{reviews.map((review) => <ReviewCard key={review.referenceCode} review={review} />)}</div>}</section>;
+  return <section><PageHeading eyebrow="Published feedback" title="Explore reviews" description="Search feedback that has completed the publication workflow." /><form className="mt-6 grid gap-3 rounded-xl border border-ink/10 bg-white p-6 shadow-sm md:grid-cols-[1.5fr_1fr_1fr_0.7fr_auto]" onSubmit={(event) => { event.preventDefault(); void loadReviews(); }}><input className="input" placeholder="Search course or feedback" value={filters.search} onChange={(event) => setFilters({ ...filters, search: event.target.value })} /><input className="input" autoComplete="off" list={COURSE_LIST_ID} placeholder="Course ID" value={filters.courseId} onChange={(event) => setFilters({ ...filters, courseId: event.target.value })} /><select className="input" value={filters.category} onChange={(event) => setFilters({ ...filters, category: event.target.value })}><option value="">All categories</option>{reviewCategories.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}</select><select className="input" value={filters.rating} onChange={(event) => setFilters({ ...filters, rating: event.target.value })}><option value="">Any rating</option>{[1, 2, 3, 4, 5].map((rating) => <option key={rating} value={rating}>{rating} / 5</option>)}</select><button className="rounded-lg bg-ocean px-4 py-2 text-sm font-semibold text-white hover:bg-ocean/90" type="submit">Search</button></form>{error && <p className="mt-5 rounded-lg bg-rose-50 px-4 py-3 text-sm text-rose-800" role="alert">{error}</p>}{isLoading ? <LoadingState /> : reviews.length === 0 ? <EmptyState title="No published reviews yet" text="Try a different filter or check back after the review workflow publishes new feedback." /> : <div className="mt-6 grid gap-4 lg:grid-cols-2">{reviews.map((review) => <ReviewCard key={review.referenceCode} review={review} />)}</div>}</section>;
 }
 
 function ReviewCard({ review }: { review: FeedbackResponse }) {
