@@ -5,6 +5,7 @@ import (
 
 	"github.com/Kishore200524/CS455-Project/backend/internal/appeals"
 	"github.com/Kishore200524/CS455-Project/backend/internal/auth"
+	"github.com/Kishore200524/CS455-Project/backend/internal/triage"
 )
 
 // Option configures optional Server dependencies.
@@ -18,6 +19,11 @@ func WithCookieSecure(secure bool) Option {
 // WithAppealStore supplies the moderator appeal store.
 func WithAppealStore(store appeals.Store) Option {
 	return func(s *Server) { s.appealStore = store }
+}
+
+// WithTriageDispatcher schedules saved reviews for asynchronous triage.
+func WithTriageDispatcher(dispatcher triage.Dispatcher) Option {
+	return func(s *Server) { s.triageDispatcher = dispatcher }
 }
 
 // registerModeratorRoutes is the single place the moderator endpoints are

@@ -26,14 +26,15 @@ const (
 )
 
 var (
-	ErrInvalidCourseID     = errors.New("courseId must not be empty and must be at most 120 characters")
-	ErrInvalidCourseTitle  = errors.New("courseTitle must not be empty and must be at most 160 characters")
-	ErrInvalidCategory     = errors.New("category must be one of teaching, content, assessment, workload, resources, or other")
-	ErrInvalidRating       = errors.New("rating must be between 1 and 5")
-	ErrInvalidContent      = errors.New("content must not be empty and must be at most 5000 characters")
-	ErrReviewNotFound      = errors.New("review was not found")
-	ErrAppealNotEligible   = errors.New("this review is not eligible for an appeal")
-	ErrAppealAlreadyExists = errors.New("this review has already been appealed")
+	ErrInvalidCourseID    = errors.New("courseId must not be empty and must be at most 120 characters")
+	ErrInvalidCourseTitle = errors.New("courseTitle must not be empty and must be at most 160 characters")
+	ErrInvalidCategory    = errors.New("category must be one of teaching, content, assessment, workload, resources, or other")
+	ErrInvalidRating      = errors.New("rating must be between 1 and 5")
+	ErrInvalidContent     = errors.New("content must not be empty and must be at most 5000 characters")
+	ErrReviewNotFound     = errors.New("review was not found")
+	ErrAppealNotEligible  = errors.New("this review is not eligible for an appeal")
+	ErrReviewNotEligible  = errors.New("review is not eligible for this status update")
+  ErrAppealAlreadyExists = errors.New("this review has already been appealed")
 )
 
 type CreateInput struct {
