@@ -17,6 +17,7 @@ import (
 	"github.com/Kishore200524/CS455-Project/backend/internal/database"
 	"github.com/Kishore200524/CS455-Project/backend/internal/email"
 	"github.com/Kishore200524/CS455-Project/backend/internal/httpapi"
+	"github.com/Kishore200524/CS455-Project/backend/internal/triage"
 )
 
 func main() {
@@ -30,6 +31,9 @@ func run() error {
 	defer stop()
 
 	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("validate configuration: %w", err)
+	}
 	connectCtx, cancelConnect := context.WithTimeout(ctx, 10*time.Second)
 	store, err := database.Connect(connectCtx, cfg.MongoURI, cfg.MongoDatabase)
 	cancelConnect()
@@ -43,6 +47,41 @@ func run() error {
 			log.Printf("disconnect from MongoDB: %v", err)
 		}
 	}()
+	var provider triage.Provider
+	switch cfg.TriageProvider {
+	case "development-mock":
+		provider = triage.NewDevelopmentMockProvider()
+		log.Printf("WARNING: TRIAGE_PROVIDER=development-mock; this deterministic local classifier is not a real AI provider")
+	case "gemini":
+		geminiProvider, err := triage.NewGeminiProvider(cfg.GeminiAPIKey, cfg.GeminiModel, cfg.TriageProcessingTimeout)
+		if err != nil {
+			return fmt.Errorf("initialize Gemini triage provider: %w", err)
+		}
+		provider = geminiProvider
+		log.Printf("Gemini triage provider configured: model=%s; API key is present", cfg.GeminiModel)
+	default:
+		provider = triage.NewAnthropicProvider(cfg.AnthropicAPIKey, cfg.AnthropicModel, cfg.AnthropicAPIURL, cfg.TriageProcessingTimeout)
+		if cfg.AnthropicAPIKey == "" {
+			log.Printf("WARNING: ANTHROPIC_API_KEY is not configured; reviews remain Submitted and triage retries until a provider key is configured")
+		}
+	}
+	log.Printf("WARNING: BRIGADING_MODE=development-noop; FR-8 brigading detection is not implemented")
+	triageService := triage.NewService(
+		store,
+		provider,
+		triage.WithWorkers(cfg.TriageWorkers),
+		triage.WithQueueSize(cfg.TriageQueueSize),
+		triage.WithMaxRetries(cfg.TriageMaxRetries),
+		triage.WithRetryBackoff(cfg.TriageRetryBackoff),
+		triage.WithProcessingTimeout(cfg.TriageProcessingTimeout),
+		triage.WithRecoveryInterval(cfg.TriageRecoveryInterval),
+		triage.WithLeaseDuration(cfg.TriageLeaseDuration),
+		triage.WithDuplicateThreshold(cfg.TriageDuplicateThreshold),
+		triage.WithBrigadingChecker(triage.NewDevelopmentNoopBrigadingChecker()),
+	)
+	triageService.Start(ctx)
+	defer triageService.Stop()
+
 	var emailService auth.EmailService
 	switch cfg.EmailMode {
 	case "console":
@@ -61,8 +100,14 @@ func run() error {
 	go appeals.RunExpiryWorker(ctx, store, appeals.DefaultSweepInterval)
 
 	server := &http.Server{
-		Addr:              ":" + cfg.Port,
-		Handler:           httpapi.NewServer(store, auth.NewService(store, emailService), httpapi.WithCookieSecure(cfg.CookieSecure), httpapi.WithAppealStore(store)),
+		Addr: ":" + cfg.Port,
+		Handler: httpapi.NewServer(
+			store,
+			auth.NewService(store, emailService),
+			httpapi.WithCookieSecure(cfg.CookieSecure),
+			httpapi.WithAppealStore(store),
+			httpapi.WithTriageDispatcher(triageService),
+		),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	serverErrors := make(chan error, 1)

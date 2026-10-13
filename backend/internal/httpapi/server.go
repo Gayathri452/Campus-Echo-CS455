@@ -8,13 +8,15 @@ import (
 	"github.com/Kishore200524/CS455-Project/backend/internal/appeals"
 	"github.com/Kishore200524/CS455-Project/backend/internal/auth"
 	"github.com/Kishore200524/CS455-Project/backend/internal/feedback"
+	"github.com/Kishore200524/CS455-Project/backend/internal/triage"
 )
 
 type Server struct {
-	feedbackStore feedback.Store
-	authService   *auth.Service
-	cookieSecure  bool
-	appealStore   appeals.Store
+	feedbackStore    feedback.Store
+	authService      *auth.Service
+	cookieSecure     bool
+	appealStore      appeals.Store
+	triageDispatcher triage.Dispatcher
 }
 
 // NewServer builds the API handler. Optional dependencies (see WithAppealStore)

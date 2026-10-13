@@ -31,6 +31,7 @@ var (
 	ErrInvalidContent     = errors.New("content must not be empty and must be at most 5000 characters")
 	ErrReviewNotFound     = errors.New("review was not found")
 	ErrAppealNotEligible  = errors.New("this review is not eligible for an appeal")
+	ErrReviewNotEligible  = errors.New("review is not eligible for this status update")
 )
 
 type CreateInput struct {
@@ -50,6 +51,7 @@ type Feedback struct {
 	Rating        int        `json:"rating" bson:"rating"`
 	Content       string     `json:"content" bson:"content"`
 	Status        string     `json:"status" bson:"status"`
+	FlagReason    string     `json:"flagReason,omitempty" bson:"flagReason,omitempty"`
 	CreatedAt     time.Time  `json:"createdAt" bson:"createdAt"`
 	PublishedAt   *time.Time `json:"publishedAt,omitempty" bson:"publishedAt,omitempty"`
 }

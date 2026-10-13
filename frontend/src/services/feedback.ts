@@ -19,6 +19,7 @@ export interface FeedbackResponse extends FeedbackInput {
   referenceCode: string;
   status: string;
   createdAt: string;
+  flagReason?: string;
   publishedAt?: string;
 }
 
@@ -45,10 +46,15 @@ async function requestJSON(
   options: RequestInit,
   fallback: string,
 ): Promise<unknown> {
-  const response = await fetch(path, {
-    ...options,
-    credentials: "same-origin",
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      ...options,
+      credentials: "same-origin",
+    });
+  } catch {
+    throw new Error("Could not reach the review service. Check your connection and try again.");
+  }
   const text = await response.text();
   let result: unknown = null;
   try {
@@ -74,7 +80,8 @@ function isFeedback(value: unknown): value is FeedbackResponse {
     typeof value.rating === "number" &&
     typeof value.content === "string" &&
     typeof value.status === "string" &&
-    typeof value.createdAt === "string";
+    typeof value.createdAt === "string" &&
+    (value.flagReason === undefined || typeof value.flagReason === "string");
 }
 
 function isCourseRating(value: unknown): value is CourseRating {
