@@ -65,7 +65,20 @@ func run() error {
 			log.Printf("WARNING: ANTHROPIC_API_KEY is not configured; reviews remain Submitted and triage retries until a provider key is configured")
 		}
 	}
-	log.Printf("WARNING: BRIGADING_MODE=development-noop; FR-8 brigading detection is not implemented")
+	var brigadingChecker triage.BrigadingChecker
+	switch cfg.BrigadingMode {
+	case "gemini":
+		embedder, err := triage.NewGeminiSemanticEmbedder(cfg.GeminiAPIKey, cfg.GeminiEmbeddingModel, cfg.TriageProcessingTimeout)
+		if err != nil {
+			return fmt.Errorf("initialize Gemini semantic embedding provider: %w", err)
+		}
+		brigadingChecker = triage.NewGeminiBrigadingChecker(embedder, store)
+		log.Printf("Gemini brigading detection configured: model=%s, window=%s, minimum reviews=%d, similarity threshold >%.0f%%",
+			cfg.GeminiEmbeddingModel, triage.BrigadingWindow, triage.BrigadingReviewThreshold, triage.BrigadingSimilarityLimit*100)
+	default:
+		brigadingChecker = triage.NewDevelopmentNoopBrigadingChecker()
+		log.Printf("WARNING: BRIGADING_MODE=development-noop; FR-8 brigading detection is not implemented")
+	}
 	triageService := triage.NewService(
 		store,
 		provider,
@@ -77,7 +90,7 @@ func run() error {
 		triage.WithRecoveryInterval(cfg.TriageRecoveryInterval),
 		triage.WithLeaseDuration(cfg.TriageLeaseDuration),
 		triage.WithDuplicateThreshold(cfg.TriageDuplicateThreshold),
-		triage.WithBrigadingChecker(triage.NewDevelopmentNoopBrigadingChecker()),
+		triage.WithBrigadingChecker(brigadingChecker),
 	)
 	triageService.Start(ctx)
 	defer triageService.Stop()

@@ -27,6 +27,7 @@ type Config struct {
 	AnthropicAPIURL          string
 	GeminiAPIKey             string
 	GeminiModel              string
+	GeminiEmbeddingModel     string
 	TriageWorkers            int
 	TriageQueueSize          int
 	TriageMaxRetries         int
@@ -58,7 +59,8 @@ func Load() Config {
 		AnthropicModel:           getEnv("ANTHROPIC_MODEL", "claude-haiku-5-5"),
 		AnthropicAPIURL:          getEnv("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages"),
 		GeminiAPIKey:             getEnv("GEMINI_API_KEY", ""),
-		GeminiModel:              getEnv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
+		GeminiModel:              getEnv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
+		GeminiEmbeddingModel:     getEnv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001"),
 		TriageWorkers:            getIntEnv("TRIAGE_WORKERS", 2),
 		TriageQueueSize:          getIntEnv("TRIAGE_QUEUE_SIZE", 64),
 		TriageMaxRetries:         getIntEnv("TRIAGE_MAX_RETRIES", 3),
@@ -81,11 +83,14 @@ func (c Config) Validate() error {
 	if c.TriageProvider == "gemini" && strings.TrimSpace(c.GeminiAPIKey) == "" {
 		return fmt.Errorf("GEMINI_API_KEY is required when TRIAGE_PROVIDER=gemini")
 	}
-	if c.BrigadingMode != "development-noop" {
-		return fmt.Errorf("BRIGADING_MODE must be development-noop until the brigading implementation is integrated")
+	if c.BrigadingMode != "development-noop" && c.BrigadingMode != "gemini" {
+		return fmt.Errorf("BRIGADING_MODE must be gemini or development-noop")
 	}
 	if c.BrigadingMode == "development-noop" && c.AppEnv != "development" {
 		return fmt.Errorf("development-noop brigading mode is only allowed when APP_ENV=development")
+	}
+	if c.BrigadingMode == "gemini" && strings.TrimSpace(c.GeminiAPIKey) == "" {
+		return fmt.Errorf("GEMINI_API_KEY is required when BRIGADING_MODE=gemini")
 	}
 	if c.TriageWorkers <= 0 || c.TriageQueueSize <= 0 || c.TriageMaxRetries < 0 {
 		return fmt.Errorf("triage workers/queue must be positive and retries cannot be negative")

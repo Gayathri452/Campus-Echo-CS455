@@ -17,7 +17,7 @@ import (
 	"google.golang.org/genai"
 )
 
-const defaultGeminiModel = "gemini-2.5-flash-lite"
+const defaultGeminiModel = "gemini-3.5-flash-lite"
 const maxGeminiErrorBody = 512
 
 var ErrGeminiProviderNotConfigured = errors.New("Gemini provider is not configured")

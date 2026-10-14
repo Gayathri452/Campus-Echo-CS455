@@ -26,36 +26,40 @@ type Mongo struct {
 }
 
 type feedbackRecord struct {
-	ID              primitive.ObjectID `bson:"_id"`
-	ReferenceCode   string             `bson:"referenceCode"`
-	CourseID        string             `bson:"courseId"`
-	CourseTitle     string             `bson:"courseTitle"`
-	Category        string             `bson:"category"`
-	Rating          int                `bson:"rating"`
-	Content         string             `bson:"content"`
-	Status          string             `bson:"status"`
-	FlagReason      string             `bson:"flagReason,omitempty"`
-	ProcessingError string             `bson:"processingError,omitempty"`
-	TriageAttempts  int                `bson:"triageAttempts,omitempty"`
-	CreatedAt       time.Time          `bson:"createdAt"`
-	PublishedAt     *time.Time         `bson:"publishedAt,omitempty"`
+	ID                     primitive.ObjectID `bson:"_id"`
+	ReferenceCode          string             `bson:"referenceCode"`
+	CourseID               string             `bson:"courseId"`
+	CourseTitle            string             `bson:"courseTitle"`
+	Category               string             `bson:"category"`
+	Rating                 int                `bson:"rating"`
+	Content                string             `bson:"content"`
+	Status                 string             `bson:"status"`
+	SemanticEmbedding      []float32          `bson:"semanticEmbedding,omitempty"`
+	SemanticEmbeddingModel string             `bson:"semanticEmbeddingModel,omitempty"`
+	FlagReason             string             `bson:"flagReason,omitempty"`
+	ProcessingError        string             `bson:"processingError,omitempty"`
+	TriageAttempts         int                `bson:"triageAttempts,omitempty"`
+	CreatedAt              time.Time          `bson:"createdAt"`
+	PublishedAt            *time.Time         `bson:"publishedAt,omitempty"`
 }
 
 func (r feedbackRecord) feedback() feedback.Feedback {
 	return feedback.Feedback{
-		ID:              r.ID.Hex(),
-		ReferenceCode:   r.ReferenceCode,
-		CourseID:        r.CourseID,
-		CourseTitle:     r.CourseTitle,
-		Category:        r.Category,
-		Rating:          r.Rating,
-		Content:         r.Content,
-		Status:          r.Status,
-		FlagReason:      r.FlagReason,
-		ProcessingError: r.ProcessingError,
-		TriageAttempts:  r.TriageAttempts,
-		CreatedAt:       r.CreatedAt,
-		PublishedAt:     r.PublishedAt,
+		ID:                     r.ID.Hex(),
+		ReferenceCode:          r.ReferenceCode,
+		CourseID:               r.CourseID,
+		CourseTitle:            r.CourseTitle,
+		Category:               r.Category,
+		Rating:                 r.Rating,
+		Content:                r.Content,
+		Status:                 r.Status,
+		SemanticEmbedding:      r.SemanticEmbedding,
+		SemanticEmbeddingModel: r.SemanticEmbeddingModel,
+		FlagReason:             r.FlagReason,
+		ProcessingError:        r.ProcessingError,
+		TriageAttempts:         r.TriageAttempts,
+		CreatedAt:              r.CreatedAt,
+		PublishedAt:            r.PublishedAt,
 	}
 }
 
@@ -606,6 +610,27 @@ func (m *Mongo) UpdateStatus(ctx context.Context, id, status, reason string) err
 	return nil
 }
 
+func (m *Mongo) SaveSemanticEmbedding(ctx context.Context, id, model string, embedding []float32) error {
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return fmt.Errorf("parse review ID for semantic embedding: %w", err)
+	}
+	if len(embedding) == 0 || strings.TrimSpace(model) == "" {
+		return errors.New("semantic embedding and model must not be empty")
+	}
+	result, err := m.feedbackCollection.UpdateOne(ctx,
+		bson.M{"_id": objectID},
+		bson.M{"$set": bson.M{"semanticEmbedding": embedding, "semanticEmbeddingModel": model}},
+	)
+	if err != nil {
+		return fmt.Errorf("save semantic embedding: %w", err)
+	}
+	if result.MatchedCount == 0 {
+		return feedback.ErrReviewNotFound
+	}
+	return nil
+}
+
 func (m *Mongo) MarkTriageFailed(ctx context.Context, id, reason string) error {
 	objectID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
@@ -650,7 +675,7 @@ func (m *Mongo) FlagReviews(ctx context.Context, ids []string, reason string) er
 	}
 	_, err := m.feedbackCollection.UpdateMany(
 		ctx,
-		bson.M{"_id": bson.M{"$in": objectIDs}, "status": feedback.StatusSubmitted},
+		bson.M{"_id": bson.M{"$in": objectIDs}, "status": bson.M{"$in": []string{feedback.StatusSubmitted, feedback.StatusPublished}}},
 		bson.M{
 			"$set":   bson.M{"status": feedback.StatusFlagged, "flagReason": reason},
 			"$unset": bson.M{"triageLeaseUntil": "", "publishedAt": ""},
@@ -696,12 +721,11 @@ func (m *Mongo) ListSubmitted(ctx context.Context, limit int) ([]feedback.Feedba
 }
 
 func (m *Mongo) ListRecentByCourse(ctx context.Context, courseID string, limit int) ([]feedback.Feedback, error) {
-	if limit <= 0 {
-		limit = 25
+	findOptions := options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}})
+	if limit > 0 {
+		findOptions.SetLimit(int64(limit))
 	}
-	cursor, err := m.feedbackCollection.Find(ctx, bson.M{"courseId": courseID}, options.Find().
-		SetSort(bson.D{{Key: "createdAt", Value: -1}}).
-		SetLimit(int64(limit)))
+	cursor, err := m.feedbackCollection.Find(ctx, bson.M{"courseId": courseID}, findOptions)
 	if err != nil {
 		return nil, fmt.Errorf("list recent feedback for course: %w", err)
 	}
@@ -713,6 +737,29 @@ func (m *Mongo) ListRecentByCourse(ctx context.Context, courseID string, limit i
 	result := make([]feedback.Feedback, 0, len(docs))
 	for i := range docs {
 		result = append(result, docs[i].feedback())
+	}
+	return result, nil
+}
+
+func (m *Mongo) ListCourseReviewsInWindow(ctx context.Context, courseID string, since, until time.Time) ([]feedback.Feedback, error) {
+	cursor, err := m.feedbackCollection.Find(ctx, bson.M{
+		"courseId": courseID,
+		"createdAt": bson.M{
+			"$gte": since,
+			"$lte": until,
+		},
+	}, options.Find().SetSort(bson.D{{Key: "createdAt", Value: 1}}))
+	if err != nil {
+		return nil, fmt.Errorf("list course reviews in velocity window: %w", err)
+	}
+	defer cursor.Close(ctx)
+	var records []feedbackRecord
+	if err := cursor.All(ctx, &records); err != nil {
+		return nil, fmt.Errorf("decode course reviews in velocity window: %w", err)
+	}
+	result := make([]feedback.Feedback, 0, len(records))
+	for _, record := range records {
+		result = append(result, record.feedback())
 	}
 	return result, nil
 }
