@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import type { AuthSession } from "../services/auth";
 import AnnouncementsPanel from "./student/AnnouncementsPanel";
-import { COURSE_LIST_ID, CourseOptions, CourseTitleAutofill } from "./student/CourseSuggestions";
+import { CourseIdInput, CourseTitleAutofill } from "./student/CourseSuggestions";
 import ReferenceNotebookPage from "./student/ReferenceNotebookPage";
 import SaveToNotebook from "./student/SaveToNotebook";
 import {
@@ -91,7 +91,6 @@ function StudentDashboardPage({ session, onLogout }: StudentDashboardPageProps) 
             initialReferenceCode={trackedReference}
           />
         )}
-        <CourseOptions accessToken={session.accessToken} />
       </div>
     </main>
   );
@@ -235,7 +234,7 @@ function SubmitReview({ accessToken, onComplete }: { accessToken?: string; onCom
       <form className="mt-6 space-y-6 rounded-xl border border-ink/10 bg-white p-6 shadow-sm" onSubmit={handleSubmit}>
         <div className="grid gap-5 sm:grid-cols-2">
           <Field label="Course ID">
-            <input className="input" autoComplete="off" list={COURSE_LIST_ID} placeholder="CS455" value={form.courseId} onChange={(event) => setField("courseId", event.target.value)} />
+            <CourseIdInput accessToken={accessToken} onChange={(value) => setField("courseId", value)} onPick={(course) => setField("courseTitle", course.title)} placeholder="CS455" value={form.courseId} />
           </Field>
           <Field label="Course title">
             <input className="input" placeholder="Software Engineering" value={form.courseTitle} onChange={(event) => setField("courseTitle", event.target.value)} />
@@ -306,7 +305,7 @@ function ExploreReviews({ accessToken }: { accessToken?: string }) {
         onSubmit={(event) => { event.preventDefault(); void loadReviews(); }}
       >
         <input className="input" placeholder="Search course or feedback" value={filters.search} onChange={(event) => setFilters({ ...filters, search: event.target.value })} />
-        <input className="input" autoComplete="off" list={COURSE_LIST_ID} placeholder="Course ID" value={filters.courseId} onChange={(event) => setFilters({ ...filters, courseId: event.target.value })} />
+        <CourseIdInput accessToken={accessToken} onChange={(value) => setFilters((current) => ({ ...current, courseId: value }))} placeholder="Course ID" value={filters.courseId} />
         <select className="input" value={filters.category} onChange={(event) => setFilters({ ...filters, category: event.target.value })}>
           <option value="">All categories</option>
           {reviewCategories.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}

@@ -10,7 +10,7 @@ import {
   updateNotebookEntry,
   type NotebookEntry,
 } from "../../services/referenceNotebook";
-import { COURSE_LIST_ID } from "./CourseSuggestions";
+import { CourseIdInput } from "./CourseSuggestions";
 
 // "My codes": the student's private notebook of review reference codes, with
 // a note per code and the latest status. Stored only in this browser.
@@ -190,6 +190,7 @@ function ReferenceNotebookPage({ ownerId, accessToken, onTrack }: ReferenceNoteb
       </div>
 
       <AddCodeForm
+        accessToken={accessToken}
         onAdd={(code, courseId, note) => {
           const updated = addToNotebook(ownerId, { referenceCode: code, courseId, note });
           if (updated) {
@@ -369,7 +370,13 @@ function NotebookCard({
   );
 }
 
-function AddCodeForm({ onAdd }: { onAdd: (code: string, courseId: string, note: string) => void }) {
+function AddCodeForm({
+  accessToken,
+  onAdd,
+}: {
+  accessToken?: string;
+  onAdd: (code: string, courseId: string, note: string) => void;
+}) {
   const [code, setCode] = useState("");
   const [courseId, setCourseId] = useState("");
   const [error, setError] = useState("");
@@ -402,11 +409,10 @@ function AddCodeForm({ onAdd }: { onAdd: (code: string, courseId: string, note: 
         </label>
         <label className="block">
           <span className="sr-only">Course ID (optional)</span>
-          <input
-            autoComplete="off"
+          <CourseIdInput
+            accessToken={accessToken}
             className="input uppercase placeholder:normal-case"
-            list={COURSE_LIST_ID}
-            onChange={(event) => setCourseId(event.target.value)}
+            onChange={setCourseId}
             placeholder="Course ID (optional)"
             value={courseId}
           />
