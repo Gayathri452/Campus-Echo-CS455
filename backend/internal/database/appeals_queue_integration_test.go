@@ -155,6 +155,111 @@ func TestQueueListUnclaimedIncludesExpiredButNotFreshLocks(t *testing.T) {
 	}
 }
 
+func TestTriageClaimRecoveryAndStatusPersistence(t *testing.T) {
+	store, ctx := queueIntegrationMongo(t)
+	created, err := store.Create(ctx, feedback.CreateInput{
+		CourseID: "CS455", CourseTitle: "Software Engineering", Category: "teaching",
+		Rating: 4, Content: "A safe review for triage integration.",
+	})
+	if err != nil {
+		t.Fatalf("create feedback: %v", err)
+	}
+
+	pending, err := store.ListSubmitted(ctx, 10)
+	if err != nil {
+		t.Fatalf("list submitted feedback: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != created.ID {
+		t.Fatalf("pending reviews = %+v, want only %s", pending, created.ID)
+	}
+
+	claimed, ok, err := store.ClaimForTriage(ctx, created.ID, time.Minute)
+	if err != nil || !ok || claimed.ID != created.ID {
+		t.Fatalf("first triage claim = (%+v, %v, %v)", claimed, ok, err)
+	}
+	if claimed.TriageAttempts != 1 {
+		t.Fatalf("first triage attempt = %d, want 1", claimed.TriageAttempts)
+	}
+	if _, ok, err := store.ClaimForTriage(ctx, created.ID, time.Minute); err != nil || ok {
+		t.Fatalf("duplicate triage claim = (%v, %v), want false without error", ok, err)
+	}
+	if pending, err := store.ListSubmitted(ctx, 10); err != nil || len(pending) != 0 {
+		t.Fatalf("leased review listed for recovery: (%+v, %v)", pending, err)
+	}
+
+	if err := store.ReleaseTriage(ctx, created.ID); err != nil {
+		t.Fatalf("release triage lease: %v", err)
+	}
+	if pending, err := store.ListSubmitted(ctx, 10); err != nil || len(pending) != 1 {
+		t.Fatalf("released review missing from recovery: (%+v, %v)", pending, err)
+	}
+	claimed, ok, err = store.ClaimForTriage(ctx, created.ID, time.Minute)
+	if err != nil || !ok || claimed.TriageAttempts != 2 {
+		t.Fatalf("recovered triage claim = (%+v, %v, %v), want persisted attempt 2", claimed, ok, err)
+	}
+	if err := store.UpdateStatus(ctx, created.ID, feedback.StatusFlagged, "harassment: targeted abuse"); err != nil {
+		t.Fatalf("persist triage status: %v", err)
+	}
+	updated, err := store.FindByReference(ctx, created.ReferenceCode)
+	if err != nil {
+		t.Fatalf("find updated review: %v", err)
+	}
+	if updated.Status != feedback.StatusFlagged || updated.FlagReason != "harassment: targeted abuse" {
+		t.Fatalf("updated review = (%s, %q)", updated.Status, updated.FlagReason)
+	}
+
+	failedReview, err := store.Create(ctx, feedback.CreateInput{
+		CourseID: "CS455", CourseTitle: "Software Engineering", Category: "teaching",
+		Rating: 4, Content: "A review whose classifier failed.",
+	})
+	if err != nil {
+		t.Fatalf("create review for terminal failure: %v", err)
+	}
+	if _, ok, err := store.ClaimForTriage(ctx, failedReview.ID, time.Minute); err != nil || !ok {
+		t.Fatalf("claim review for terminal failure = (%v, %v)", ok, err)
+	}
+	if err := store.MarkTriageFailed(ctx, failedReview.ID, feedback.ProcessingFailureMessage); err != nil {
+		t.Fatalf("persist terminal triage failure: %v", err)
+	}
+	failed, err := store.FindByReference(ctx, failedReview.ReferenceCode)
+	if err != nil {
+		t.Fatalf("find terminally failed review: %v", err)
+	}
+	if failed.Status != feedback.StatusTriageFailed || failed.ProcessingError != feedback.ProcessingFailureMessage {
+		t.Fatalf("terminal failure state = (%s, %q)", failed.Status, failed.ProcessingError)
+	}
+}
+
+func TestTriageBatchFlagPersistsReason(t *testing.T) {
+	store, ctx := queueIntegrationMongo(t)
+	first, err := store.Create(ctx, feedback.CreateInput{
+		CourseID: "CS455", CourseTitle: "Software Engineering", Category: "teaching",
+		Rating: 4, Content: "First review in a batch.",
+	})
+	if err != nil {
+		t.Fatalf("create first feedback: %v", err)
+	}
+	second, err := store.Create(ctx, feedback.CreateInput{
+		CourseID: "CS455", CourseTitle: "Software Engineering", Category: "teaching",
+		Rating: 3, Content: "Second review in a batch.",
+	})
+	if err != nil {
+		t.Fatalf("create second feedback: %v", err)
+	}
+	if err := store.FlagReviews(ctx, []string{first.ID, second.ID}, "coordinated activity"); err != nil {
+		t.Fatalf("flag review batch: %v", err)
+	}
+	for _, review := range []feedback.Feedback{first, second} {
+		updated, err := store.FindByReference(ctx, review.ReferenceCode)
+		if err != nil {
+			t.Fatalf("find review %s: %v", review.ReferenceCode, err)
+		}
+		if updated.Status != feedback.StatusFlagged || updated.FlagReason != "coordinated activity" {
+			t.Fatalf("review %s = (%s, %q)", review.ReferenceCode, updated.Status, updated.FlagReason)
+		}
+	}
+}
+
 func TestQueueListUnclaimedSortOrder(t *testing.T) {
 	store, ctx := queueIntegrationMongo(t)
 	now := time.Now().UTC()
@@ -245,8 +350,11 @@ func TestStudentAppealCreatesModeratorQueueTicket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create feedback: %v", err)
 	}
-	if review.Status != feedback.StatusFlagged || review.FlagReason == "" {
-		t.Fatalf("new review = %+v, want a flagged review with a reason", review)
+	if review.Status != feedback.StatusSubmitted {
+		t.Fatalf("new review status = %q, want %q before asynchronous triage", review.Status, feedback.StatusSubmitted)
+	}
+	if err := store.UpdateStatus(ctx, review.ID, feedback.StatusFlagged, "other: requires review"); err != nil {
+		t.Fatalf("mark review flagged for appeal: %v", err)
 	}
 
 	count, err := store.appealCollection.CountDocuments(ctx, bson.M{"referenceCode": review.ReferenceCode})
@@ -297,7 +405,7 @@ func TestStudentAppealCreatesModeratorQueueTicket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get claimed student appeal: %v", err)
 	}
-	if ticket.FeedbackText != input.Content || ticket.FlagReason != feedback.FlagReasonReview || ticket.AppealComment != "Please reconsider my feedback." {
+	if ticket.FeedbackText != input.Content || ticket.FlagReason != "other: requires review" || ticket.AppealComment != "Please reconsider my feedback." {
 		t.Fatalf("moderator ticket details = %+v, want submitted review, flag reason, and appeal comment", ticket)
 	}
 	if err := store.Resolve(ctx, claimed.ID, moderatorID, appeals.ActionRestore, ""); err != nil {

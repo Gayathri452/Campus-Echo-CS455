@@ -12,17 +12,19 @@ import (
 )
 
 const (
-	MaxContentLength  = 5000
-	MaxCourseTitle    = 160
-	MaxCategory       = 60
-	MinRating         = 1
-	MaxRating         = 5
-	StatusSubmitted   = "submitted"
-	StatusFlagged     = "flagged"
-	StatusRejected    = "rejected"
-	StatusPublished   = "published"
-	FlagReasonReview  = "Held for moderator review; AI moderation is not enabled yet"
-	StatusUnderAppeal = "under_appeal"
+	MaxContentLength         = 5000
+	MaxCourseTitle           = 160
+	MaxCategory              = 60
+	MinRating                = 1
+	MaxRating                = 5
+	StatusSubmitted          = "submitted"
+	StatusFlagged            = "flagged"
+	StatusRejected           = "rejected"
+	StatusPublished          = "published"
+	StatusTriageFailed       = "triage_failed"
+	FlagReasonReview         = "Held for moderator review; AI moderation is not enabled yet"
+	StatusUnderAppeal        = "under_appeal"
+	ProcessingFailureMessage = "Automatic moderation could not complete after retrying. Please contact support."
 )
 
 var (
@@ -33,6 +35,7 @@ var (
 	ErrInvalidContent      = errors.New("content must not be empty and must be at most 5000 characters")
 	ErrReviewNotFound      = errors.New("review was not found")
 	ErrAppealNotEligible   = errors.New("this review is not eligible for an appeal")
+	ErrReviewNotEligible   = errors.New("review is not eligible for this status update")
 	ErrAppealAlreadyExists = errors.New("this review has already been appealed")
 )
 
@@ -53,7 +56,11 @@ type Feedback struct {
 	Rating                  int        `json:"rating" bson:"rating"`
 	Content                 string     `json:"content" bson:"content"`
 	Status                  string     `json:"status" bson:"status"`
+	SemanticEmbedding       []float32  `json:"-" bson:"semanticEmbedding,omitempty"`
+	SemanticEmbeddingModel  string     `json:"-" bson:"semanticEmbeddingModel,omitempty"`
 	FlagReason              string     `json:"flagReason,omitempty" bson:"flagReason,omitempty"`
+	ProcessingError         string     `json:"processingError,omitempty" bson:"processingError,omitempty"`
+	TriageAttempts          int        `json:"-" bson:"triageAttempts,omitempty"`
 	AppealStatus            string     `json:"appealStatus,omitempty" bson:"-"`
 	AppealResolutionComment string     `json:"appealResolutionComment,omitempty" bson:"-"`
 	CreatedAt               time.Time  `json:"createdAt" bson:"createdAt"`

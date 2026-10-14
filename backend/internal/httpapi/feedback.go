@@ -33,6 +33,11 @@ func (s *Server) createFeedback(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save feedback"})
 		return
 	}
+	if s.triageDispatcher != nil {
+		if err := s.triageDispatcher.Dispatch(r.Context(), created.ID); err != nil {
+			log.Printf("triage dispatch deferred to pending-review recovery: review_id=%s error=%v", created.ID, err)
+		}
+	}
 
 	writeJSON(w, http.StatusCreated, created)
 }

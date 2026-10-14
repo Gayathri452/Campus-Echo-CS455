@@ -31,7 +31,7 @@ func newModeratorTestServer(t *testing.T) (handler http.Handler, studentToken st
 	service := auth.NewService(newMemoryAuthRepository())
 	ctx := context.Background()
 
-	student, err := service.RegisterStudent(ctx, "student@college.edu", "long-secure-password")
+	student, err := service.RegisterStudent(ctx, "student@iitk.ac.in", "long-secure-password")
 	if err != nil {
 		t.Fatal(err)
 	}

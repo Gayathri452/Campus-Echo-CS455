@@ -90,7 +90,7 @@ func queueModeratorSession(t *testing.T, service *auth.Service) auth.Session {
 func queueStudentSession(t *testing.T, service *auth.Service) auth.Session {
 	t.Helper()
 	const (
-		email    = "student@example.com"
+		email    = "student@iitk.ac.in"
 		password = "long-secure-password"
 	)
 	if _, err := service.RegisterStudent(context.Background(), email, password); err != nil {

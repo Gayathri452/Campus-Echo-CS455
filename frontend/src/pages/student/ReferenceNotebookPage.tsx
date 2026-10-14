@@ -28,6 +28,7 @@ const statusLabel: Record<string, string> = {
   rejected: "Rejected",
   published: "Published",
   deleted: "Removed",
+  triage_failed: "Moderation needs attention",
 };
 
 const statusTone: Record<string, string> = {
@@ -35,6 +36,7 @@ const statusTone: Record<string, string> = {
   flagged: "bg-amber-50 text-amber-900",
   rejected: "bg-rose-50 text-rose-800",
   deleted: "bg-rose-50 text-rose-800",
+  triage_failed: "bg-rose-50 text-rose-800",
 };
 
 const appealLabel: Record<string, string> = {

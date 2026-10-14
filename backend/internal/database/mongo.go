@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/Kishore200524/CS455-Project/backend/internal/auth"
@@ -22,6 +23,44 @@ type Mongo struct {
 	sessionCollection  *mongo.Collection
 	otpCollection      *mongo.Collection
 	appealCollection   *mongo.Collection
+}
+
+type feedbackRecord struct {
+	ID                     primitive.ObjectID `bson:"_id"`
+	ReferenceCode          string             `bson:"referenceCode"`
+	CourseID               string             `bson:"courseId"`
+	CourseTitle            string             `bson:"courseTitle"`
+	Category               string             `bson:"category"`
+	Rating                 int                `bson:"rating"`
+	Content                string             `bson:"content"`
+	Status                 string             `bson:"status"`
+	SemanticEmbedding      []float32          `bson:"semanticEmbedding,omitempty"`
+	SemanticEmbeddingModel string             `bson:"semanticEmbeddingModel,omitempty"`
+	FlagReason             string             `bson:"flagReason,omitempty"`
+	ProcessingError        string             `bson:"processingError,omitempty"`
+	TriageAttempts         int                `bson:"triageAttempts,omitempty"`
+	CreatedAt              time.Time          `bson:"createdAt"`
+	PublishedAt            *time.Time         `bson:"publishedAt,omitempty"`
+}
+
+func (r feedbackRecord) feedback() feedback.Feedback {
+	return feedback.Feedback{
+		ID:                     r.ID.Hex(),
+		ReferenceCode:          r.ReferenceCode,
+		CourseID:               r.CourseID,
+		CourseTitle:            r.CourseTitle,
+		Category:               r.Category,
+		Rating:                 r.Rating,
+		Content:                r.Content,
+		Status:                 r.Status,
+		SemanticEmbedding:      r.SemanticEmbedding,
+		SemanticEmbeddingModel: r.SemanticEmbeddingModel,
+		FlagReason:             r.FlagReason,
+		ProcessingError:        r.ProcessingError,
+		TriageAttempts:         r.TriageAttempts,
+		CreatedAt:              r.CreatedAt,
+		PublishedAt:            r.PublishedAt,
+	}
 }
 
 func Connect(ctx context.Context, uri, databaseName string) (*Mongo, error) {
@@ -99,6 +138,22 @@ func (m *Mongo) ensureAuthIndexes(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("create appeal reference index: %w", err)
+	}
+	_, err = m.feedbackCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "status", Value: 1},
+			{Key: "triageLeaseUntil", Value: 1},
+			{Key: "createdAt", Value: 1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create submitted feedback recovery index: %w", err)
+	}
+	_, err = m.feedbackCollection.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "courseId", Value: 1}, {Key: "createdAt", Value: -1}},
+	})
+	if err != nil {
+		return fmt.Errorf("create course feedback lookup index: %w", err)
 	}
 	return nil
 }
@@ -331,8 +386,7 @@ func (m *Mongo) Create(ctx context.Context, input feedback.CreateInput) (feedbac
 		"category":      input.Category,
 		"rating":        input.Rating,
 		"content":       input.Content,
-		"status":        feedback.StatusFlagged,
-		"flagReason":    feedback.FlagReasonReview,
+		"status":        feedback.StatusSubmitted,
 		"createdAt":     now,
 	}
 
@@ -354,8 +408,7 @@ func (m *Mongo) Create(ctx context.Context, input feedback.CreateInput) (feedbac
 		Category:      input.Category,
 		Rating:        input.Rating,
 		Content:       input.Content,
-		Status:        feedback.StatusFlagged,
-		FlagReason:    feedback.FlagReasonReview,
+		Status:        feedback.StatusSubmitted,
 		CreatedAt:     now,
 	}, nil
 }
@@ -434,13 +487,14 @@ func (m *Mongo) CourseRatings(ctx context.Context, courseID string) ([]feedback.
 }
 
 func (m *Mongo) FindByReference(ctx context.Context, referenceCode string) (feedback.Feedback, error) {
-	var result feedback.Feedback
-	if err := m.feedbackCollection.FindOne(ctx, bson.M{"referenceCode": referenceCode}).Decode(&result); err != nil {
+	var record feedbackRecord
+	if err := m.feedbackCollection.FindOne(ctx, bson.M{"referenceCode": referenceCode}).Decode(&record); err != nil {
 		if err == mongo.ErrNoDocuments {
 			return feedback.Feedback{}, feedback.ErrReviewNotFound
 		}
 		return feedback.Feedback{}, fmt.Errorf("find feedback by reference: %w", err)
 	}
+	result := record.feedback()
 	if result.Status == feedback.StatusFlagged && result.FlagReason == "" {
 		result.FlagReason = feedback.FlagReasonReview
 	}
@@ -456,6 +510,256 @@ func (m *Mongo) FindByReference(ctx context.Context, referenceCode string) (feed
 	if err == nil {
 		result.AppealStatus = appeal.Status
 		result.AppealResolutionComment = appeal.ResolutionComment
+	}
+	return result, nil
+}
+
+func (m *Mongo) FindByID(ctx context.Context, id string) (feedback.Feedback, error) {
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return feedback.Feedback{}, fmt.Errorf("parse review ID: %w", err)
+	}
+	var result feedbackRecord
+	if err := m.feedbackCollection.FindOne(ctx, bson.M{"_id": objectID}).Decode(&result); err != nil {
+		if err == mongo.ErrNoDocuments {
+			return feedback.Feedback{}, feedback.ErrReviewNotFound
+		}
+		return feedback.Feedback{}, fmt.Errorf("find feedback by ID: %w", err)
+	}
+	return result.feedback(), nil
+}
+
+func (m *Mongo) ClaimForTriage(ctx context.Context, id string, lease time.Duration) (feedback.Feedback, bool, error) {
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return feedback.Feedback{}, false, fmt.Errorf("parse review ID for triage claim: %w", err)
+	}
+	now := time.Now().UTC()
+	var record feedbackRecord
+	err = m.feedbackCollection.FindOneAndUpdate(
+		ctx,
+		bson.M{
+			"_id":    objectID,
+			"status": feedback.StatusSubmitted,
+			"$or": []bson.M{
+				{"triageLeaseUntil": bson.M{"$exists": false}},
+				{"triageLeaseUntil": bson.M{"$lte": now}},
+			},
+		},
+		bson.M{
+			"$set":   bson.M{"triageLeaseUntil": now.Add(lease)},
+			"$inc":   bson.M{"triageAttempts": 1},
+			"$unset": bson.M{"processingError": ""},
+		},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	).Decode(&record)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return feedback.Feedback{}, false, nil
+		}
+		return feedback.Feedback{}, false, fmt.Errorf("claim review for triage: %w", err)
+	}
+	return record.feedback(), true, nil
+}
+
+func (m *Mongo) ReleaseTriage(ctx context.Context, id string) error {
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return fmt.Errorf("parse review ID for triage lease release: %w", err)
+	}
+	_, err = m.feedbackCollection.UpdateOne(
+		ctx,
+		bson.M{"_id": objectID, "status": feedback.StatusSubmitted},
+		bson.M{"$unset": bson.M{"triageLeaseUntil": ""}},
+	)
+	if err != nil {
+		return fmt.Errorf("release review triage lease: %w", err)
+	}
+	return nil
+}
+
+func (m *Mongo) UpdateStatus(ctx context.Context, id, status, reason string) error {
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return fmt.Errorf("parse review ID: %w", err)
+	}
+	if status != feedback.StatusPublished && status != feedback.StatusFlagged {
+		return fmt.Errorf("unsupported triage status %q", status)
+	}
+	set := bson.M{"status": status}
+	unset := bson.M{"triageLeaseUntil": ""}
+	if reason == "" {
+		unset["flagReason"] = ""
+	} else {
+		set["flagReason"] = reason
+	}
+	if status == feedback.StatusPublished {
+		set["publishedAt"] = time.Now().UTC()
+	} else {
+		unset["publishedAt"] = ""
+	}
+	unset["processingError"] = ""
+	update := bson.M{"$set": set, "$unset": unset}
+	result, err := m.feedbackCollection.UpdateOne(ctx, bson.M{"_id": objectID, "status": feedback.StatusSubmitted}, update)
+	if err != nil {
+		return fmt.Errorf("update review status: %w", err)
+	}
+	if result.MatchedCount == 0 {
+		return feedback.ErrReviewNotEligible
+	}
+	return nil
+}
+
+func (m *Mongo) SaveSemanticEmbedding(ctx context.Context, id, model string, embedding []float32) error {
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return fmt.Errorf("parse review ID for semantic embedding: %w", err)
+	}
+	if len(embedding) == 0 || strings.TrimSpace(model) == "" {
+		return errors.New("semantic embedding and model must not be empty")
+	}
+	result, err := m.feedbackCollection.UpdateOne(ctx,
+		bson.M{"_id": objectID},
+		bson.M{"$set": bson.M{"semanticEmbedding": embedding, "semanticEmbeddingModel": model}},
+	)
+	if err != nil {
+		return fmt.Errorf("save semantic embedding: %w", err)
+	}
+	if result.MatchedCount == 0 {
+		return feedback.ErrReviewNotFound
+	}
+	return nil
+}
+
+func (m *Mongo) MarkTriageFailed(ctx context.Context, id, reason string) error {
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return fmt.Errorf("parse review ID for triage failure: %w", err)
+	}
+	result, err := m.feedbackCollection.UpdateOne(
+		ctx,
+		bson.M{"_id": objectID, "status": feedback.StatusSubmitted},
+		bson.M{
+			"$set":   bson.M{"status": feedback.StatusTriageFailed, "processingError": reason},
+			"$unset": bson.M{"triageLeaseUntil": ""},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("mark review triage failed: %w", err)
+	}
+	if result.MatchedCount == 0 {
+		return feedback.ErrReviewNotEligible
+	}
+	return nil
+}
+
+func (m *Mongo) FlagReviews(ctx context.Context, ids []string, reason string) error {
+	if strings.TrimSpace(reason) == "" {
+		return errors.New("flag reason must not be empty")
+	}
+	objectIDs := make([]primitive.ObjectID, 0, len(ids))
+	seen := make(map[primitive.ObjectID]struct{}, len(ids))
+	for _, id := range ids {
+		objectID, err := primitive.ObjectIDFromHex(id)
+		if err != nil {
+			return fmt.Errorf("parse review ID for batch flag: %w", err)
+		}
+		if _, exists := seen[objectID]; exists {
+			continue
+		}
+		seen[objectID] = struct{}{}
+		objectIDs = append(objectIDs, objectID)
+	}
+	if len(objectIDs) == 0 {
+		return errors.New("at least one review ID is required to flag a batch")
+	}
+	_, err := m.feedbackCollection.UpdateMany(
+		ctx,
+		bson.M{"_id": bson.M{"$in": objectIDs}, "status": bson.M{"$in": []string{feedback.StatusSubmitted, feedback.StatusPublished}}},
+		bson.M{
+			"$set":   bson.M{"status": feedback.StatusFlagged, "flagReason": reason},
+			"$unset": bson.M{"triageLeaseUntil": "", "publishedAt": ""},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("flag brigading review batch: %w", err)
+	}
+	return nil
+}
+
+func (m *Mongo) ListSubmitted(ctx context.Context, limit int) ([]feedback.Feedback, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	now := time.Now().UTC()
+	cursor, err := m.feedbackCollection.Find(
+		ctx,
+		bson.M{
+			"status": feedback.StatusSubmitted,
+			"$or": []bson.M{
+				{"triageLeaseUntil": bson.M{"$exists": false}},
+				{"triageLeaseUntil": bson.M{"$lte": now}},
+			},
+		},
+		options.Find().
+			SetSort(bson.D{{Key: "createdAt", Value: 1}, {Key: "_id", Value: 1}}).
+			SetLimit(int64(limit)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find submitted reviews for triage recovery: %w", err)
+	}
+	defer cursor.Close(ctx)
+	var records []feedbackRecord
+	if err := cursor.All(ctx, &records); err != nil {
+		return nil, fmt.Errorf("decode submitted reviews for triage recovery: %w", err)
+	}
+	reviews := make([]feedback.Feedback, 0, len(records))
+	for _, record := range records {
+		reviews = append(reviews, record.feedback())
+	}
+	return reviews, nil
+}
+
+func (m *Mongo) ListRecentByCourse(ctx context.Context, courseID string, limit int) ([]feedback.Feedback, error) {
+	findOptions := options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}})
+	if limit > 0 {
+		findOptions.SetLimit(int64(limit))
+	}
+	cursor, err := m.feedbackCollection.Find(ctx, bson.M{"courseId": courseID}, findOptions)
+	if err != nil {
+		return nil, fmt.Errorf("list recent feedback for course: %w", err)
+	}
+	defer cursor.Close(ctx)
+	var docs []feedbackRecord
+	if err := cursor.All(ctx, &docs); err != nil {
+		return nil, fmt.Errorf("decode recent feedback for course: %w", err)
+	}
+	result := make([]feedback.Feedback, 0, len(docs))
+	for i := range docs {
+		result = append(result, docs[i].feedback())
+	}
+	return result, nil
+}
+
+func (m *Mongo) ListCourseReviewsInWindow(ctx context.Context, courseID string, since, until time.Time) ([]feedback.Feedback, error) {
+	cursor, err := m.feedbackCollection.Find(ctx, bson.M{
+		"courseId": courseID,
+		"createdAt": bson.M{
+			"$gte": since,
+			"$lte": until,
+		},
+	}, options.Find().SetSort(bson.D{{Key: "createdAt", Value: 1}}))
+	if err != nil {
+		return nil, fmt.Errorf("list course reviews in velocity window: %w", err)
+	}
+	defer cursor.Close(ctx)
+	var records []feedbackRecord
+	if err := cursor.All(ctx, &records); err != nil {
+		return nil, fmt.Errorf("decode course reviews in velocity window: %w", err)
+	}
+	result := make([]feedback.Feedback, 0, len(records))
+	for _, record := range records {
+		result = append(result, record.feedback())
 	}
 	return result, nil
 }

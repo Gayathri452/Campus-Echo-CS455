@@ -1,6 +1,7 @@
 package feedback
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -42,5 +43,18 @@ func TestValidate(t *testing.T) {
 				t.Fatalf("Validate() error = %v, want %v", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestFeedbackJSONOmitsSemanticEmbedding(t *testing.T) {
+	body, err := json.Marshal(Feedback{
+		SemanticEmbedding:      []float32{0.1, 0.2},
+		SemanticEmbeddingModel: "test-model",
+	})
+	if err != nil {
+		t.Fatalf("marshal feedback: %v", err)
+	}
+	if strings.Contains(string(body), "semanticEmbedding") || strings.Contains(string(body), "test-model") {
+		t.Fatalf("feedback JSON exposed internal embedding fields: %s", body)
 	}
 }

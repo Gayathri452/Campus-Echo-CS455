@@ -21,10 +21,12 @@ atomic updates.
 
 The React student feedback page submits to the Go API through Vite's `/api`
 development proxy. The API validates the request and inserts an anonymous
-feedback document into MongoDB as `flagged` while AI moderation is unavailable.
+feedback document into MongoDB as `submitted`, then dispatches background AI
+triage. The worker can publish or flag a review, detect same-course lexical
+duplicates, and optionally check a course's recent review cohort for brigading.
 Flagged submissions stay out of the moderator queue until a student submits
-their single appeal. That appeal creates an `under_appeal` ticket in the
-moderator collection; moderator resolution updates both the ticket and review.
+their single appeal. That appeal creates an `under_appeal` ticket; moderator
+resolution updates both the ticket and review.
 
 ```text
 StudentFeedbackPage
@@ -36,11 +38,13 @@ StudentFeedbackPage
 ```
 
 The feedback record contains a MongoDB ID, reference code, course details,
-content, status, flag reason, and creation timestamp. It does not contain a
-student identity. AI classification is not connected yet, so the current
-development behavior flags every submission with a fixed explanatory reason.
-Students can look up that state by reference code, appeal once, and see the
-appeal status and moderator resolution note.
+content, status, flag reason, and creation timestamp, but no student identity.
+When Gemini brigading mode is enabled, semantic vectors are generated in batches
+and cached on these feedback documents, together with their embedding-model
+name. The detector evaluates reviews from the previous ten minutes, ignores
+reviews of five or fewer words, and flags the cohort only when velocity exceeds
+15 reviews and average pairwise semantic similarity exceeds 75%. The explicit
+development no-op mode disables this detector.
 
 The starter authentication adds separate `users` and `sessions` collections.
 Passwords are bcrypt-hashed; clients receive random 12-hour bearer tokens while
@@ -50,10 +54,9 @@ one-time CLI command and can provision moderator accounts; role checks are
 enforced by the API. The React client holds its bearer token in memory rather
 than browser persistent storage.
 
-The current setup does not verify a college email against an institution, does
-not yet expose moderator queue operations, and has no independent MongoDB
-database account for the future triage worker. Production HTTPS must be
-provided by the deployment environment.
+The current setup does not verify a college email against an institution and
+has no independent MongoDB database account for the triage worker. Production
+HTTPS must be provided by the deployment environment.
 
 ## Implementation boundary
 
