@@ -43,9 +43,10 @@ Prerequisites: Go 1.24+, Node.js 18+, npm, and a MongoDB server.
    hidden. The password must be at least 6 characters. This command only
    creates an administrator and does not reset or reveal existing passwords.
 
-3. Copy the example configuration once. For Gemini, edit the ignored local
-   `.env` file and set `TRIAGE_PROVIDER=gemini`, paste your key after
-   `GEMINI_API_KEY=`, and keep `GEMINI_MODEL=gemini-2.5-flash-lite`:
+3. Copy the example configuration once. To use Gemini for both AI triage and
+   semantic brigading detection, edit the ignored local `.env` file, set
+   `TRIAGE_PROVIDER=gemini` and `BRIGADING_MODE=gemini`, and paste your key
+   after `GEMINI_API_KEY=`:
 
    ```powershell
    Copy-Item .env.example .env
@@ -70,10 +71,9 @@ Prerequisites: Go 1.24+, Node.js 18+, npm, and a MongoDB server.
    The API listens on `http://localhost:8080`. Go loads `.env` from the current
    directory or its parent directory. The example uses console email mode, so
    local student-registration OTP codes appear in the API terminal. Successful
-   configuration prints the selected Gemini model and confirms that the key is
+   configuration prints the selected models and confirms that the key is
    present, without printing the key itself. Startup fails clearly if Gemini is
-   selected with an empty key; a bad key or unavailable model is reported when
-   the first review is classified.
+   selected with an empty key; provider errors are reported in the API terminal.
 
 4. In another terminal, start the frontend from the repository root:
 
@@ -116,11 +116,10 @@ so the end-to-end workflow can be exercised without sending review text to an
 external service. This deterministic development classifier is **not real AI**
 and is rejected when `APP_ENV` is not `development`.
 
-To use Gemini, set `TRIAGE_PROVIDER=gemini` and provide `GEMINI_API_KEY` in the
-ignored local `.env` or the backend process environment. `GEMINI_MODEL` defaults
-to `gemini-2.5-flash-lite`, which Google's current model guide lists as suited
-to high-volume classification. Gemini models and free-tier eligibility can
-change; check Google's [model list](https://ai.google.dev/gemini-api/docs/models),
+To use Gemini for text classification, set `TRIAGE_PROVIDER=gemini` and provide
+`GEMINI_API_KEY` in the ignored local `.env` or the backend process environment.
+`GEMINI_MODEL` defaults to `gemini-3.5-flash-lite`. Gemini models and free-tier
+eligibility can change; check Google's [model list](https://ai.google.dev/gemini-api/docs/models),
 [pricing](https://ai.google.dev/gemini-api/docs/pricing), and the model's
 availability in your Google AI Studio project before use. The free tier has
 model-specific rate limits and is limited to eligible models. Do not enable
@@ -133,15 +132,28 @@ requests JSON-schema output and validates the decision, reason code, and
 explanation. Strong criticism, negative sentiment, and low ratings alone must
 not be flagged.
 
+To enable FR-8 semantic brigading detection, also set
+`BRIGADING_MODE=gemini`. The detector considers reviews in a rolling ten-minute
+window for the same course, excludes reviews with five or fewer words, and
+flags the eligible batch only when there are more than 15 reviews and the
+average pairwise Gemini embedding cosine similarity is strictly above 75%.
+It uses `GEMINI_EMBEDDING_MODEL` (default `gemini-embedding-001`) and stores
+embeddings with the feedback record so later checks do not repeatedly call the
+embedding API. Changing the configured embedding model causes vectors to be
+regenerated. Embedding requests send review text to Google; apply the same
+privacy and provider-terms considerations as for Gemini classification.
+`BRIGADING_MODE=development-noop` remains available for local tests that should
+not call the embedding API, but it does not implement FR-8.
+
 To use Claude, set `TRIAGE_PROVIDER=anthropic` and provide `ANTHROPIC_API_KEY`
 in the untracked local `.env` or process environment. `ANTHROPIC_MODEL` defaults
 to `claude-haiku-5-5`; `ANTHROPIC_API_URL` defaults to
 `https://api.anthropic.com/v1/messages`. Both real providers report missing or
 failed credentials instead of silently switching to the mock.
 
-For an opt-in real Gemini smoke request (uses one API call), open a PowerShell
-terminal in `backend`. This loads the key into that terminal's process
-environment without printing it, then runs the opt-in test:
+For opt-in Gemini smoke tests (one classification request and one embedding
+request), open a PowerShell terminal in `backend`. This loads the key into that
+terminal's process environment without printing it, then runs both tests:
 
 ```powershell
 $settings = Get-Content ..\.env
@@ -149,10 +161,12 @@ $keyLine = $settings | Where-Object { $_ -match '^GEMINI_API_KEY=' } | Select-Ob
 $env:GEMINI_API_KEY = (($keyLine -split '=', 2)[1]).Trim().Trim('"')
 $modelLine = $settings | Where-Object { $_ -match '^GEMINI_MODEL=' } | Select-Object -First 1
 $env:GEMINI_MODEL = (($modelLine -split '=', 2)[1]).Trim().Trim('"')
+$embeddingModelLine = $settings | Where-Object { $_ -match '^GEMINI_EMBEDDING_MODEL=' } | Select-Object -First 1
+$env:GEMINI_EMBEDDING_MODEL = (($embeddingModelLine -split '=', 2)[1]).Trim().Trim('"')
 $env:GEMINI_SMOKE_TEST = "1"
-go test ./internal/triage -run TestGeminiProviderSmoke -v
-Remove-Item Env:GEMINI_API_KEY, Env:GEMINI_MODEL, Env:GEMINI_SMOKE_TEST
-Remove-Variable settings, keyLine, modelLine
+go test ./internal/triage -run 'TestGemini(Provider|SemanticEmbedder)Smoke' -v
+Remove-Item Env:GEMINI_API_KEY, Env:GEMINI_MODEL, Env:GEMINI_EMBEDDING_MODEL, Env:GEMINI_SMOKE_TEST
+Remove-Variable settings, keyLine, modelLine, embeddingModelLine
 ```
 
 The normal test suites use fake providers and make no Gemini requests. To
@@ -169,10 +183,8 @@ word-similarity threshold (default `0.82`; separate from brigading thresholds).
 Pending `submitted` reviews are rediscovered from MongoDB after startup and
 periodically, so a full in-memory queue does not lose persisted submissions.
 
-The brigading integration is deliberately a development-only no-op until the
-separate FR-8 implementation is merged. It is not a brigading detector.
-`BRIGADING_MODE=development-noop` is accepted only with `APP_ENV=development`;
-production startup remains blocked until the real detector is wired in.
+`BRIGADING_MODE=development-noop` is accepted only with
+`APP_ENV=development`; it intentionally disables brigading detection.
 
 Review submissions accept:
 
@@ -196,9 +208,9 @@ institutional verification before relying on registration outside local
 development.
 
 The feedback endpoint responds with HTTP 201, an anonymous reference code, and
-the initial `submitted` status. Classification and duplicate checking happen
-in the background; use the Track status view to retrieve the latest state and
-any saved flag reason.
+the initial `submitted` status. Classification, duplicate detection, and
+configured brigading checks happen in the background; use the Track status view
+to retrieve the latest state and any saved flag reason.
 
 The local Go server uses HTTP. Do not deploy it publicly without HTTPS; use a
 TLS-terminating reverse proxy or the approved cloud platform's HTTPS service.

@@ -20,6 +20,10 @@ const (
 	DefaultQueueSize          = 64
 	DefaultRetryBackoff       = 2 * time.Second
 	DefaultDuplicateThreshold = 0.82
+	BrigadingWindow           = 10 * time.Minute
+	BrigadingReviewThreshold  = 15
+	BrigadingSimilarityLimit  = 0.75
+	BrigadingMinWordCount     = 6
 	DefaultProcessTimeout     = 25 * time.Second
 	DefaultRecoveryInterval   = 15 * time.Second
 	DefaultLeaseDuration      = time.Minute
@@ -63,9 +67,11 @@ type DuplicateDetector interface {
 }
 
 type BrigadingCheck struct {
-	Detected  bool
-	Reason    string
-	ReviewIDs []string
+	Detected          bool
+	Reason            string
+	ReviewIDs         []string
+	Velocity          int
+	AverageSimilarity float64
 }
 
 type BrigadingChecker interface {
@@ -79,6 +85,8 @@ type ReviewRepository interface {
 	UpdateStatus(ctx context.Context, id, status, reason string) error
 	FlagReviews(ctx context.Context, ids []string, reason string) error
 	ListRecentByCourse(ctx context.Context, courseID string, limit int) ([]feedback.Feedback, error)
+	ListCourseReviewsInWindow(ctx context.Context, courseID string, since, until time.Time) ([]feedback.Feedback, error)
+	SaveSemanticEmbedding(ctx context.Context, reviewID, model string, embedding []float32) error
 	ListSubmitted(ctx context.Context, limit int) ([]feedback.Feedback, error)
 }
 
@@ -550,18 +558,15 @@ func (s *Service) processJob(parent context.Context, job Job) error {
 		return &JobFailure{Attempt: attempt, Err: fmt.Errorf("%w: provider returned an unsupported decision", ErrInvalidDecision)}
 	}
 
+	var modelFlagReason string
 	if result.Decision == DecisionFlag {
-		reason, err := formatFlagReason(result)
+		modelFlagReason, err = formatFlagReason(result)
 		if err != nil {
 			return &JobFailure{Attempt: attempt, Err: err}
 		}
-		if err := s.store.UpdateStatus(ctx, review.ID, feedback.StatusFlagged, reason); err != nil {
-			return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
-		}
-		return nil
 	}
 
-	recent, err := s.store.ListRecentByCourse(ctx, review.CourseID, 100)
+	recent, err := s.store.ListRecentByCourse(ctx, review.CourseID, 0)
 	if err != nil {
 		return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
 	}
@@ -569,16 +574,16 @@ func (s *Service) processJob(parent context.Context, job Job) error {
 	if err != nil {
 		return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
 	}
-	if duplicate.IsDuplicate {
-		if err := s.store.UpdateStatus(ctx, review.ID, feedback.StatusFlagged, duplicate.Explanation); err != nil {
-			return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
-		}
-		return nil
+
+	now := time.Now().UTC()
+	windowReviews, err := s.store.ListCourseReviewsInWindow(ctx, review.CourseID, now.Add(-BrigadingWindow), now)
+	if err != nil {
+		return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
 	}
 	if s.brigadingChecker == nil {
 		return &JobFailure{Attempt: attempt, Err: ErrBrigadingUnavailable}
 	}
-	check, err := s.brigadingChecker.Check(ctx, review, recent)
+	check, err := s.brigadingChecker.Check(ctx, review, windowReviews)
 	if err != nil {
 		return &JobFailure{Attempt: attempt, Retryable: true, Err: fmt.Errorf("brigading check: %w", err)}
 	}
@@ -588,6 +593,18 @@ func (s *Service) processJob(parent context.Context, job Job) error {
 		}
 		ids := uniqueReviewIDs(check.ReviewIDs, review.ID)
 		if err := s.store.FlagReviews(ctx, ids, check.Reason); err != nil {
+			return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
+		}
+		return nil
+	}
+	if modelFlagReason != "" {
+		if err := s.store.UpdateStatus(ctx, review.ID, feedback.StatusFlagged, modelFlagReason); err != nil {
+			return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
+		}
+		return nil
+	}
+	if duplicate.IsDuplicate {
+		if err := s.store.UpdateStatus(ctx, review.ID, feedback.StatusFlagged, duplicate.Explanation); err != nil {
 			return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
 		}
 		return nil

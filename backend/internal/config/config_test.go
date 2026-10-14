@@ -60,15 +60,31 @@ func TestConfigValidateRequiresGeminiCredentials(t *testing.T) {
 	}
 }
 
+func TestConfigValidateRequiresGeminiKeyForSemanticBrigading(t *testing.T) {
+	cfg := validConfig("development-mock")
+	cfg.BrigadingMode = "gemini"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "GEMINI_API_KEY is required") {
+		t.Fatalf("Validate() error = %v, want missing key error for Gemini brigading", err)
+	}
+	cfg.GeminiAPIKey = "test-key"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with Gemini brigading key = %v", err)
+	}
+}
+
 func TestLoadReadsGeminiSettingsFromEnvironment(t *testing.T) {
 	t.Setenv("TRIAGE_PROVIDER", "gemini")
+	t.Setenv("BRIGADING_MODE", "gemini")
 	t.Setenv("GEMINI_API_KEY", "test-key")
 	t.Setenv("GEMINI_MODEL", "test-model")
+	t.Setenv("GEMINI_EMBEDDING_MODEL", "test-embedding-model")
 
 	cfg := Load()
-	if cfg.TriageProvider != "gemini" || cfg.GeminiAPIKey != "test-key" || cfg.GeminiModel != "test-model" {
-		t.Fatalf("Load() Gemini configuration = provider %q, key present %t, model %q",
-			cfg.TriageProvider, cfg.GeminiAPIKey != "", cfg.GeminiModel)
+	if cfg.TriageProvider != "gemini" || cfg.BrigadingMode != "gemini" ||
+		cfg.GeminiAPIKey != "test-key" || cfg.GeminiModel != "test-model" ||
+		cfg.GeminiEmbeddingModel != "test-embedding-model" {
+		t.Fatalf("Load() Gemini configuration = provider %q, brigading mode %q, key present %t, model %q, embedding model %q",
+			cfg.TriageProvider, cfg.BrigadingMode, cfg.GeminiAPIKey != "", cfg.GeminiModel, cfg.GeminiEmbeddingModel)
 	}
 }
 
