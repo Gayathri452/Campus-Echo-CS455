@@ -98,7 +98,7 @@ func TestGeminiSemanticEmbedderClassifiesAPIStatusRetries(t *testing.T) {
 	} {
 		t.Run(fmt.Sprintf("status_%d", test.status), func(t *testing.T) {
 			embedder := &GeminiSemanticEmbedder{
-				client: &fakeGeminiEmbeddingClient{err: &genai.APIError{Code: test.status, Message: "provider error"}},
+				client: &fakeGeminiEmbeddingClient{err: genai.APIError{Code: test.status, Message: "provider error"}},
 				model:  DefaultGeminiEmbeddingModel, apiKey: "secret-key", timeout: time.Second,
 			}
 			_, err := embedder.Embed(context.Background(), []string{"review"})
