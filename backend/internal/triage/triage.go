@@ -55,6 +55,12 @@ type Provider interface {
 	Classify(ctx context.Context, review feedback.Feedback) (AIResult, error)
 }
 
+type unconfiguredProvider struct{}
+
+func (unconfiguredProvider) Classify(context.Context, feedback.Feedback) (AIResult, error) {
+	return AIResult{}, errors.New("triage provider is not configured")
+}
+
 type DuplicateResult struct {
 	IsDuplicate bool    `json:"isDuplicate"`
 	Similarity  float64 `json:"similarity"`
@@ -363,7 +369,7 @@ func WithBrigadingChecker(checker BrigadingChecker) Option {
 
 func NewService(repo ReviewRepository, provider Provider, opts ...Option) *Service {
 	if provider == nil {
-		provider = NewAnthropicProvider("", "", "", DefaultProcessTimeout)
+		provider = unconfiguredProvider{}
 	}
 	service := &Service{
 		store:              repo,

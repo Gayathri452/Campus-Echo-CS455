@@ -22,9 +22,6 @@ type Config struct {
 	SMTPFrom                 string
 	CookieSecure             bool
 	TriageProvider           string
-	AnthropicAPIKey          string
-	AnthropicModel           string
-	AnthropicAPIURL          string
 	GeminiAPIKey             string
 	GeminiModel              string
 	GeminiEmbeddingModel     string
@@ -54,10 +51,7 @@ func Load() Config {
 		SMTPPassword:             getEnv("SMTP_PASSWORD", ""),
 		SMTPFrom:                 getEnv("SMTP_FROM", ""),
 		CookieSecure:             getBoolEnv("COOKIE_SECURE", false),
-		TriageProvider:           getEnv("TRIAGE_PROVIDER", "anthropic"),
-		AnthropicAPIKey:          getEnv("ANTHROPIC_API_KEY", ""),
-		AnthropicModel:           getEnv("ANTHROPIC_MODEL", "claude-haiku-5-5"),
-		AnthropicAPIURL:          getEnv("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages"),
+		TriageProvider:           getEnv("TRIAGE_PROVIDER", "gemini"),
 		GeminiAPIKey:             getEnv("GEMINI_API_KEY", ""),
 		GeminiModel:              getEnv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
 		GeminiEmbeddingModel:     getEnv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001"),
@@ -74,8 +68,8 @@ func Load() Config {
 }
 
 func (c Config) Validate() error {
-	if c.TriageProvider != "anthropic" && c.TriageProvider != "gemini" && c.TriageProvider != "development-mock" {
-		return fmt.Errorf("TRIAGE_PROVIDER must be anthropic, gemini, or development-mock")
+	if c.TriageProvider != "gemini" && c.TriageProvider != "development-mock" {
+		return fmt.Errorf("TRIAGE_PROVIDER must be gemini or development-mock")
 	}
 	if c.TriageProvider == "development-mock" && c.AppEnv != "development" {
 		return fmt.Errorf("development-mock triage provider is only allowed when APP_ENV=development")

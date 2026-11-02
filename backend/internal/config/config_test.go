@@ -72,6 +72,21 @@ func TestConfigValidateRequiresGeminiKeyForSemanticBrigading(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsToGeminiTriage(t *testing.T) {
+	t.Setenv("TRIAGE_PROVIDER", "")
+
+	if cfg := Load(); cfg.TriageProvider != "gemini" {
+		t.Fatalf("Load() TriageProvider = %q, want gemini", cfg.TriageProvider)
+	}
+}
+
+func TestConfigValidateRejectsUnsupportedTriageProvider(t *testing.T) {
+	cfg := validConfig("unsupported")
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "TRIAGE_PROVIDER") {
+		t.Fatalf("Validate() error = %v, want unsupported-provider error", err)
+	}
+}
+
 func TestLoadReadsGeminiSettingsFromEnvironment(t *testing.T) {
 	t.Setenv("TRIAGE_PROVIDER", "gemini")
 	t.Setenv("BRIGADING_MODE", "gemini")

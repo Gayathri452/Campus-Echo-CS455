@@ -9,8 +9,8 @@ moderation and a human appeal workflow.
 - Frontend: React, TypeScript, Vite, and Tailwind CSS
 - Backend: Go HTTP API
 - Database: MongoDB
-- AI triage providers: Google Gemini API, Anthropic Claude Messages API, or an
-  explicit development mock; configurable by environment
+- AI triage: Google Gemini API, with an explicit development-only mock for
+  offline testing
 
 ## Current starter
 
@@ -111,13 +111,12 @@ Prerequisites: Go 1.24+, Node.js 18+, npm, and a MongoDB server.
 
 ### Local AI triage configuration
 
-The example environment explicitly selects `TRIAGE_PROVIDER=development-mock`
-so the end-to-end workflow can be exercised without sending review text to an
-external service. This deterministic development classifier is **not real AI**
-and is rejected when `APP_ENV` is not `development`.
+The example environment selects `TRIAGE_PROVIDER=gemini`. Provide
+`GEMINI_API_KEY` in the ignored local `.env` or the backend process environment
+to use Gemini for text classification. The deterministic `development-mock`
+is still available for offline tests; it is **not real AI** and is rejected
+when `APP_ENV` is not `development`.
 
-To use Gemini for text classification, set `TRIAGE_PROVIDER=gemini` and provide
-`GEMINI_API_KEY` in the ignored local `.env` or the backend process environment.
 `GEMINI_MODEL` defaults to `gemini-3.5-flash-lite`. Gemini models and free-tier
 eligibility can change; check Google's [model list](https://ai.google.dev/gemini-api/docs/models),
 [pricing](https://ai.google.dev/gemini-api/docs/pricing), and the model's
@@ -144,12 +143,6 @@ regenerated. Embedding requests send review text to Google; apply the same
 privacy and provider-terms considerations as for Gemini classification.
 `BRIGADING_MODE=development-noop` remains available for local tests that should
 not call the embedding API, but it does not implement FR-8.
-
-To use Claude, set `TRIAGE_PROVIDER=anthropic` and provide `ANTHROPIC_API_KEY`
-in the untracked local `.env` or process environment. `ANTHROPIC_MODEL` defaults
-to `claude-haiku-5-5`; `ANTHROPIC_API_URL` defaults to
-`https://api.anthropic.com/v1/messages`. Both real providers report missing or
-failed credentials instead of silently switching to the mock.
 
 For opt-in Gemini smoke tests (one classification request and one embedding
 request), open a PowerShell terminal in `backend`. This loads the key into that

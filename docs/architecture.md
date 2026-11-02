@@ -10,8 +10,8 @@ CampusEcho is a modular Go monolith, not a set of backend microservices:
 - **Data:** MongoDB collections for credentials, anonymous feedback payloads,
   and moderation tickets. The triage agent must not be able to read identity
   data.
-- **AI:** Claude or AWS Bedrock behind an AI gateway; AI calls must not block
-  feedback submission.
+- **AI:** Google Gemini API for asynchronous triage and semantic embeddings;
+  AI calls must not block feedback submission.
 
 MongoDB atomic updates are required for moderation-ticket claims. The design
 rejects a separate Redis locking dependency in favor of MongoDB state-checked

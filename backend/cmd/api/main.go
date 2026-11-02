@@ -60,10 +60,7 @@ func run() error {
 		provider = geminiProvider
 		log.Printf("Gemini triage provider configured: model=%s; API key is present", cfg.GeminiModel)
 	default:
-		provider = triage.NewAnthropicProvider(cfg.AnthropicAPIKey, cfg.AnthropicModel, cfg.AnthropicAPIURL, cfg.TriageProcessingTimeout)
-		if cfg.AnthropicAPIKey == "" {
-			log.Printf("WARNING: ANTHROPIC_API_KEY is not configured; reviews remain Submitted and triage retries until a provider key is configured")
-		}
+		return fmt.Errorf("unsupported triage provider %q", cfg.TriageProvider)
 	}
 	var brigadingChecker triage.BrigadingChecker
 	switch cfg.BrigadingMode {
