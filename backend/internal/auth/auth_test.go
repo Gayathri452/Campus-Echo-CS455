@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -12,6 +13,7 @@ type memoryRepository struct {
 	password map[string]string
 	sessions map[string]string
 	otps     map[string]OTPChallenge
+	otpMutex sync.Mutex
 }
 
 func newMemoryRepository() *memoryRepository {
@@ -60,14 +62,19 @@ func (m *memoryRepository) CreateOTP(_ context.Context, challenge OTPChallenge) 
 	return nil
 }
 
-func (m *memoryRepository) IncrementOTPAttempts(_ context.Context, email string) (int, error) {
+func (m *memoryRepository) ReserveOTPAttempt(_ context.Context, email string, now time.Time) (OTPChallenge, error) {
+	m.otpMutex.Lock()
+	defer m.otpMutex.Unlock()
 	challenge, exists := m.otps[email]
-	if !exists {
-		return 0, ErrInvalidOTP
+	if !exists || now.After(challenge.ExpiresAt) {
+		return OTPChallenge{}, ErrInvalidOTP
+	}
+	if challenge.Attempts >= OTPMaxAttempts {
+		return OTPChallenge{}, ErrOTPAttempts
 	}
 	challenge.Attempts++
 	m.otps[email] = challenge
-	return challenge.Attempts, nil
+	return challenge, nil
 }
 
 func (m *memoryRepository) DeleteOTP(_ context.Context, email string) error {
@@ -239,6 +246,56 @@ func TestOTPRejectsNonIITKEmail(t *testing.T) {
 	service := NewService(newMemoryRepository(), &memoryEmailService{})
 	if err := service.RequestOTP(context.Background(), "student@example.com", "long-secure-password", "long-secure-password"); !errors.Is(err, ErrEmailNotAllowed) {
 		t.Fatalf("RequestOTP() error = %v, want ErrEmailNotAllowed", err)
+	}
+}
+
+func TestOTPVerificationReservesAtMostFiveConcurrentAttempts(t *testing.T) {
+	repository := newMemoryRepository()
+	email := "student@iitk.ac.in"
+	repository.otps[email] = OTPChallenge{
+		Email:     email,
+		OTPHash:   hashOTP("123456"),
+		ExpiresAt: time.Now().UTC().Add(time.Minute),
+	}
+	service := NewService(repository)
+
+	const requests = 100
+	results := make(chan error, requests)
+	start := make(chan struct{})
+	var done sync.WaitGroup
+	done.Add(requests)
+	for i := 0; i < requests; i++ {
+		go func() {
+			defer done.Done()
+			<-start
+			_, err := service.VerifyOTP(context.Background(), email, "000000")
+			results <- err
+		}()
+	}
+	close(start)
+	done.Wait()
+	close(results)
+
+	invalidOTP := 0
+	attemptsExceeded := 0
+	for err := range results {
+		switch {
+		case errors.Is(err, ErrInvalidOTP):
+			invalidOTP++
+		case errors.Is(err, ErrOTPAttempts):
+			attemptsExceeded++
+		default:
+			t.Fatalf("unexpected concurrent verification error: %v", err)
+		}
+	}
+	if invalidOTP != OTPMaxAttempts {
+		t.Fatalf("invalid OTP responses = %d, want %d", invalidOTP, OTPMaxAttempts)
+	}
+	if attemptsExceeded != requests-OTPMaxAttempts {
+		t.Fatalf("attempt-limit responses = %d, want %d", attemptsExceeded, requests-OTPMaxAttempts)
+	}
+	if repository.otps[email].Attempts != OTPMaxAttempts {
+		t.Fatalf("reserved attempts = %d, want %d", repository.otps[email].Attempts, OTPMaxAttempts)
 	}
 }
 

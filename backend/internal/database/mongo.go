@@ -358,15 +358,36 @@ func (m *Mongo) CreateOTP(ctx context.Context, challenge auth.OTPChallenge) erro
 	return nil
 }
 
-func (m *Mongo) IncrementOTPAttempts(ctx context.Context, email string) (int, error) {
-	result := m.otpCollection.FindOneAndUpdate(ctx, bson.M{"_id": email}, bson.M{"$inc": bson.M{"attempts": 1}}, options.FindOneAndUpdate().SetReturnDocument(options.After))
-	var challenge struct {
-		Attempts int `bson:"attempts"`
+func (m *Mongo) ReserveOTPAttempt(ctx context.Context, email string, now time.Time) (auth.OTPChallenge, error) {
+	var challenge auth.OTPChallenge
+	err := m.otpCollection.FindOneAndUpdate(
+		ctx,
+		bson.M{
+			"_id":       email,
+			"expiresAt": bson.M{"$gt": now},
+			"attempts":  bson.M{"$lt": auth.OTPMaxAttempts},
+		},
+		bson.M{"$inc": bson.M{"attempts": 1}},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	).Decode(&challenge)
+	if err == nil {
+		return challenge, nil
 	}
-	if err := result.Decode(&challenge); err != nil {
-		return 0, fmt.Errorf("increment OTP attempts: %w", err)
+	if err != mongo.ErrNoDocuments {
+		return auth.OTPChallenge{}, fmt.Errorf("reserve OTP attempt: %w", err)
 	}
-	return challenge.Attempts, nil
+
+	current, findErr := m.FindOTP(ctx, email)
+	if errors.Is(findErr, auth.ErrInvalidOTP) {
+		return auth.OTPChallenge{}, auth.ErrInvalidOTP
+	}
+	if findErr != nil {
+		return auth.OTPChallenge{}, fmt.Errorf("check OTP attempt limit: %w", findErr)
+	}
+	if current.Attempts >= auth.OTPMaxAttempts {
+		return auth.OTPChallenge{}, auth.ErrOTPAttempts
+	}
+	return auth.OTPChallenge{}, auth.ErrInvalidOTP
 }
 
 func (m *Mongo) DeleteOTP(ctx context.Context, email string) error {

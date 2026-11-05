@@ -52,14 +52,17 @@ func (m *memoryAuthRepository) CreateOTP(_ context.Context, challenge auth.OTPCh
 	return nil
 }
 
-func (m *memoryAuthRepository) IncrementOTPAttempts(_ context.Context, email string) (int, error) {
+func (m *memoryAuthRepository) ReserveOTPAttempt(_ context.Context, email string, now time.Time) (auth.OTPChallenge, error) {
 	challenge, exists := m.otps[email]
-	if !exists {
-		return 0, auth.ErrInvalidOTP
+	if !exists || now.After(challenge.ExpiresAt) {
+		return auth.OTPChallenge{}, auth.ErrInvalidOTP
+	}
+	if challenge.Attempts >= auth.OTPMaxAttempts {
+		return auth.OTPChallenge{}, auth.ErrOTPAttempts
 	}
 	challenge.Attempts++
 	m.otps[email] = challenge
-	return challenge.Attempts, nil
+	return challenge, nil
 }
 
 func (m *memoryAuthRepository) DeleteOTP(_ context.Context, email string) error {

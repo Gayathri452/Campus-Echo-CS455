@@ -88,7 +88,7 @@ type otpRepository interface {
 	FindOTP(context.Context, string) (OTPChallenge, error)
 	InvalidateOTP(context.Context, string) error
 	CreateOTP(context.Context, OTPChallenge) error
-	IncrementOTPAttempts(context.Context, string) (int, error)
+	ReserveOTPAttempt(context.Context, string, time.Time) (OTPChallenge, error)
 	DeleteOTP(context.Context, string) error
 }
 
@@ -192,21 +192,14 @@ func (s *Service) VerifyOTP(ctx context.Context, email, code string, registratio
 	if !storeOK || !studentsOK {
 		return Session{}, ErrInvalidOTP
 	}
-	challenge, err := store.FindOTP(ctx, normalized)
-	if err != nil || s.now().UTC().After(challenge.ExpiresAt) {
-		return Session{}, ErrInvalidOTP
-	}
-	if challenge.Attempts >= OTPMaxAttempts {
+	challenge, err := store.ReserveOTPAttempt(ctx, normalized, s.now().UTC())
+	if errors.Is(err, ErrOTPAttempts) {
 		return Session{}, ErrOTPAttempts
 	}
+	if err != nil {
+		return Session{}, fmt.Errorf("reserve OTP attempt: %w", err)
+	}
 	if !secureOTPMatch(challenge.OTPHash, code) {
-		attempts, incrementErr := store.IncrementOTPAttempts(ctx, normalized)
-		if incrementErr != nil {
-			return Session{}, fmt.Errorf("record OTP attempt: %w", incrementErr)
-		}
-		if attempts >= OTPMaxAttempts {
-			return Session{}, ErrOTPAttempts
-		}
 		return Session{}, ErrInvalidOTP
 	}
 	registrationPassword := ""
