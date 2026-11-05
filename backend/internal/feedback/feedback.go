@@ -71,6 +71,9 @@ type Feedback struct {
 	FlagReason              string     `json:"flagReason,omitempty" bson:"flagReason,omitempty"`
 	ProcessingError         string     `json:"processingError,omitempty" bson:"processingError,omitempty"`
 	TriageAttempts          int        `json:"-" bson:"triageAttempts,omitempty"`
+	TriageCycleAttempts     int        `json:"-" bson:"triageCycleAttempts,omitempty"`
+	TriageFailureCategory   string     `json:"-" bson:"triageFailureCategory,omitempty"`
+	TriageRetryAt           *time.Time `json:"-" bson:"triageRetryAt,omitempty"`
 	AppealStatus            string     `json:"appealStatus,omitempty" bson:"-"`
 	AppealResolutionComment string     `json:"appealResolutionComment,omitempty" bson:"-"`
 	CreatedAt               time.Time  `json:"createdAt" bson:"createdAt"`

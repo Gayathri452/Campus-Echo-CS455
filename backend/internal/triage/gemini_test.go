@@ -289,6 +289,7 @@ func TestGeminiWorkerRetriesTransientFailuresWithoutPublishingInvalidResults(t *
 			err      error
 		}
 		wantStatus   string
+		wantCategory string
 		wantCalls    int
 		wantAttempts int
 	}{
@@ -313,7 +314,7 @@ func TestGeminiWorkerRetriesTransientFailuresWithoutPublishingInvalidResults(t *
 				{err: genai.APIError{Code: 504, Message: "gateway timeout"}},
 				{err: genai.APIError{Code: 504, Message: "gateway timeout"}},
 			},
-			wantStatus: feedback.StatusTriageFailed, wantCalls: 3, wantAttempts: 3,
+			wantStatus: feedback.StatusSubmitted, wantCategory: "transient_provider", wantCalls: 3, wantAttempts: 3,
 		},
 		{
 			name: "malformed JSON then valid response",
@@ -336,7 +337,7 @@ func TestGeminiWorkerRetriesTransientFailuresWithoutPublishingInvalidResults(t *
 				{response: geminiTextResponse("{")},
 				{response: geminiTextResponse("{")},
 			},
-			wantStatus: feedback.StatusTriageFailed, wantCalls: 3, wantAttempts: 3,
+			wantStatus: feedback.StatusSubmitted, wantCategory: "malformed_response", wantCalls: 3, wantAttempts: 3,
 		},
 		{
 			name: "transient network failure then success",
@@ -357,7 +358,7 @@ func TestGeminiWorkerRetriesTransientFailuresWithoutPublishingInvalidResults(t *
 			}{
 				{err: genai.APIError{Code: 401, Message: "invalid credentials"}},
 			},
-			wantStatus: feedback.StatusTriageFailed, wantCalls: 1, wantAttempts: 1,
+			wantStatus: feedback.StatusSubmitted, wantCategory: "provider_auth", wantCalls: 1, wantAttempts: 1,
 		},
 	}
 
@@ -389,6 +390,7 @@ func TestGeminiWorkerRetriesTransientFailuresWithoutPublishingInvalidResults(t *
 			service := serviceForTest(
 				repository,
 				provider,
+				WithWorkers(1),
 				WithMaxRetries(2),
 				WithRetryBackoff(time.Millisecond),
 			)
@@ -397,7 +399,11 @@ func TestGeminiWorkerRetriesTransientFailuresWithoutPublishingInvalidResults(t *
 			if err := service.Dispatch(context.Background(), review.ID); err != nil {
 				t.Fatalf("dispatch review: %v", err)
 			}
-			waitForStatus(t, repository, review.ID, test.wantStatus)
+			if test.wantCategory != "" {
+				waitForDeferredCategory(t, repository, review.ID, test.wantCategory)
+			} else {
+				waitForStatus(t, repository, review.ID, test.wantStatus)
+			}
 
 			stored, err := repository.FindByID(context.Background(), review.ID)
 			if err != nil {
@@ -412,7 +418,7 @@ func TestGeminiWorkerRetriesTransientFailuresWithoutPublishingInvalidResults(t *
 			if stored.Status != test.wantStatus {
 				t.Fatalf("review status = %q, want %q", stored.Status, test.wantStatus)
 			}
-			if test.wantStatus == feedback.StatusTriageFailed && stored.Status == feedback.StatusPublished {
+			if test.wantCategory != "" && stored.Status == feedback.StatusPublished {
 				t.Fatal("invalid or failed classification published the review")
 			}
 		})
