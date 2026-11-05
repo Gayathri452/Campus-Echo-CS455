@@ -447,7 +447,9 @@ func (m *Mongo) Explore(ctx context.Context, filters feedback.ExploreFilters) ([
 		return nil, fmt.Errorf("find published feedback: %w", err)
 	}
 	defer cursor.Close(ctx)
-	var results []feedback.Feedback
+	// Start with an empty (not nil) slice so "no matches" is sent as [] rather
+	// than null, which the student page would reject.
+	results := []feedback.Feedback{}
 	if err := cursor.All(ctx, &results); err != nil {
 		return nil, fmt.Errorf("decode published feedback: %w", err)
 	}

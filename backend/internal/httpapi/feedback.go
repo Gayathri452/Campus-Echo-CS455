@@ -58,6 +58,9 @@ func (s *Server) exploreFeedback(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not load published reviews"})
 		return
 	}
+	if results == nil {
+		results = []feedback.Feedback{}
+	}
 	writeJSON(w, http.StatusOK, results)
 }
 
