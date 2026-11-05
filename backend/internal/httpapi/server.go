@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/Kishore200524/CS455-Project/backend/internal/appeals"
 	"github.com/Kishore200524/CS455-Project/backend/internal/auth"
@@ -17,12 +19,43 @@ type Server struct {
 	cookieSecure     bool
 	appealStore      appeals.Store
 	triageDispatcher triage.Dispatcher
+	authRateLimiter  *authRateLimiter
+}
+
+type authRateLimiter struct {
+	mu      sync.Mutex
+	entries map[string]rateLimitEntry
+}
+
+type rateLimitEntry struct {
+	count int
+	first time.Time
+}
+
+func newAuthRateLimiter() *authRateLimiter {
+	return &authRateLimiter{entries: make(map[string]rateLimitEntry)}
+}
+
+func (l *authRateLimiter) allow(key string, limit int, window time.Duration, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	entry := l.entries[key]
+	if entry.first.IsZero() || now.Sub(entry.first) >= window {
+		l.entries[key] = rateLimitEntry{count: 1, first: now}
+		return true
+	}
+	if entry.count >= limit {
+		return false
+	}
+	entry.count++
+	l.entries[key] = entry
+	return true
 }
 
 // NewServer builds the API handler. Optional dependencies (see WithAppealStore)
 // are passed as trailing options so existing callers keep compiling.
 func NewServer(feedbackStore feedback.Store, authService *auth.Service, options ...Option) http.Handler {
-	server := &Server{feedbackStore: feedbackStore, authService: authService}
+	server := &Server{feedbackStore: feedbackStore, authService: authService, authRateLimiter: newAuthRateLimiter()}
 	for _, option := range options {
 		option(server)
 	}
