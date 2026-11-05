@@ -10,8 +10,8 @@ import { getCachedCourses, type CatalogCourse } from "../../services/courses";
 
 function useCatalog(accessToken?: string) {
   const [catalog, setCatalog] = useState<CatalogCourse[]>([]);
+  // Load even without an access token (cookie-restored session).
   useEffect(() => {
-    if (!accessToken) return;
     let cancelled = false;
     getCachedCourses(accessToken)
       .then((courses) => {

@@ -38,11 +38,13 @@ function isAnnouncement(value: unknown): value is Announcement {
 
 async function request(
   path: string,
-  accessToken: string,
+  accessToken: string | undefined,
   init: { method: "GET" | "POST" | "DELETE"; body?: unknown },
   fallback: string,
 ): Promise<unknown> {
-  const headers: Record<string, string> = { Authorization: `Bearer ${accessToken}` };
+  // With a cookie-restored session there is no access token in memory; the
+  // HttpOnly session cookie (credentials: "same-origin") authenticates instead.
+  const headers: Record<string, string> = accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
   if (init.body !== undefined) headers["Content-Type"] = "application/json";
   const response = await fetch(path, {
     method: init.method,
@@ -71,7 +73,7 @@ function parseList(result: unknown): Announcement[] {
 }
 
 /** Active announcements for the signed-in user (pinned first, newest first). */
-export async function listAnnouncements(accessToken: string): Promise<Announcement[]> {
+export async function listAnnouncements(accessToken?: string): Promise<Announcement[]> {
   return parseList(await request("/api/v1/announcements", accessToken, { method: "GET" }, "Could not load announcements."));
 }
 

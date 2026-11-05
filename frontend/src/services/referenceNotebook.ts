@@ -137,12 +137,15 @@ export function notebookAsText(entries: NotebookEntry[]) {
 
 // The submit form only has the access token, so the notebook finds the
 // signed-in student's ID through GET /api/v1/auth/me (cached per token).
+// Without a token (cookie-restored session) the cookie identifies the student;
+// that answer is not cached, because a different student could sign in later
+// in the same tab and their codes must not be saved under this ID.
 let ownerCache: { token: string; promise: Promise<string> } | null = null;
 
-export function getNotebookOwner(accessToken: string): Promise<string> {
-  if (ownerCache?.token === accessToken) return ownerCache.promise;
+export function getNotebookOwner(accessToken?: string): Promise<string> {
+  if (accessToken && ownerCache?.token === accessToken) return ownerCache.promise;
   const promise = fetch("/api/v1/auth/me", {
-    headers: { Authorization: `Bearer ${accessToken}` },
+    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
     credentials: "same-origin",
   })
     .then(async (response) => {
@@ -153,9 +156,9 @@ export function getNotebookOwner(accessToken: string): Promise<string> {
       return (user as { id: string }).id;
     })
     .catch((error: unknown) => {
-      ownerCache = null;
+      if (ownerCache?.promise === promise) ownerCache = null;
       throw error;
     });
-  ownerCache = { token: accessToken, promise };
+  if (accessToken) ownerCache = { token: accessToken, promise };
   return promise;
 }

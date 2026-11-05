@@ -21,10 +21,8 @@ function SaveToNotebook({ accessToken, referenceCode, courseId, courseTitle, sta
 
   useEffect(() => {
     let cancelled = false;
-    if (!accessToken) {
-      setState("failed");
-      return;
-    }
+    // No early exit without a token: a cookie-restored session can still
+    // identify the student through /api/v1/auth/me.
     getNotebookOwner(accessToken)
       .then((ownerId) => {
         const saved = addToNotebook(ownerId, { referenceCode, courseId, courseTitle, lastStatus: status });
