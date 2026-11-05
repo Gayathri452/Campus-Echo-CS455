@@ -72,7 +72,7 @@ Older reviews without these fields continue to display them as "Not provided".
 | `flagReason` | string | why triage flagged it |
 | `appealComment` | string | the student's explanation |
 | `createdAt` | date | queue ordering |
-| `lockedBy`, `lockedAt` | string, date | set while `locked`, removed on release |
+| `lockedBy`, `lockedAt`, `lockExpiresAt` | string, date, date | set while `locked`, removed on release |
 | `resolutionComment`, `resolvedAt` | string, date | set on resolve; the student can read the comment for 72 hours after delete |
 
 On resolve, Person B also updates the review in `feedback`: `restore` sets its
@@ -112,13 +112,17 @@ All require `Authorization: Bearer <token>` of a **moderator**. No token gives
   "courseId": "CS455",
   "year": 2026,
   "professor": "Prof. Rao",
-  "status": "under_appeal",
+  "status": "locked",
   "lockedAt": "2026-10-12T10:00:00Z",
+  "lockExpiresAt": "2026-10-12T10:30:00Z",
   "createdAt": "2026-10-12T05:00:00Z"
 }
 ```
 
-`lockedAt` appears only while locked. `Ticket` (detail page) is a `Summary` plus:
+`lockedAt` and `lockExpiresAt` appear only while locked. `lockExpiresAt` is the
+deadline used by the active-appeals page; legacy locks without that field derive
+it from `lockedAt` and the standard lock duration. `Ticket` (detail page) is a
+`Summary` plus:
 
 ```json
 {
