@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Kishore200524/CS455-Project/backend/internal/courses"
 	"github.com/Kishore200524/CS455-Project/backend/internal/feedback"
 )
 
@@ -22,6 +23,23 @@ func (s *Server) createFeedback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	input = feedback.Normalize(input)
+	// Accept only courses on the administrator's course list, and take the ID
+	// and title from it. Otherwise "CS455", "cs455" and "CS 455" would count as
+	// different courses and a review flood could be split across spellings.
+	if finder, ok := s.feedbackStore.(courses.Finder); ok {
+		course, err := finder.FindCourse(r.Context(), courses.NormalizeCourseID(input.CourseID))
+		if errors.Is(err, courses.ErrCourseNotFound) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "choose a course from the course list"})
+			return
+		}
+		if err != nil {
+			log.Printf("find course: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not check the course list"})
+			return
+		}
+		input.CourseID = course.CourseID
+		input.CourseTitle = course.Title
+	}
 	if err := feedback.Validate(input); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": feedbackErrorMessage(err)})
 		return

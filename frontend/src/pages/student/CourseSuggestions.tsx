@@ -8,7 +8,8 @@ import { getCachedCourses, type CatalogCourse } from "../../services/courses";
 // the arrow keys and Enter) fills it in. It stays free text, so a course that
 // is not on the list can still be typed exactly as before.
 
-function useCatalog(accessToken?: string) {
+/** The administrator's course list (empty until it loads, or if it cannot load). */
+export function useCourseCatalog(accessToken?: string) {
   const [catalog, setCatalog] = useState<CatalogCourse[]>([]);
   // Load even without an access token (cookie-restored session).
   useEffect(() => {
@@ -25,6 +26,17 @@ function useCatalog(accessToken?: string) {
     };
   }, [accessToken]);
   return catalog;
+}
+
+/** Puts a course ID in the catalog's form: trimmed, single spaces, upper-case (as the server does). */
+export function normalizeCourseId(courseId: string): string {
+  return courseId.trim().toUpperCase().replace(/\s+/g, " ");
+}
+
+/** The listed course whose ID is exactly what was typed, ignoring case and extra spaces. */
+export function findListedCourse(catalog: CatalogCourse[], typed: string): CatalogCourse | undefined {
+  const id = normalizeCourseId(typed);
+  return id ? catalog.find((course) => course.courseId === id) : undefined;
 }
 
 /** Courses matching what was typed: IDs starting with it first, then IDs containing it, then titles. */
@@ -69,6 +81,8 @@ interface CourseIdInputProps {
   onPick?: (course: CatalogCourse) => void;
   placeholder?: string;
   className?: string;
+  /** Set when only listed courses are accepted (review submission); free text otherwise. */
+  requireListed?: boolean;
 }
 
 export function CourseIdInput({
@@ -78,8 +92,9 @@ export function CourseIdInput({
   onPick,
   placeholder,
   className = "input",
+  requireListed = false,
 }: CourseIdInputProps) {
-  const catalog = useCatalog(accessToken);
+  const catalog = useCourseCatalog(accessToken);
   const [isOpen, setIsOpen] = useState(false);
   const [active, setActive] = useState(0);
   const listId = useId();
@@ -149,7 +164,8 @@ export function CourseIdInput({
         >
           {matches.length === 0 ? (
             <li className="px-4 py-3 text-sm text-ink/55">
-              No course on the list matches “{value.trim()}”. You can still type it.
+              No course on the list matches “{value.trim()}”.{" "}
+              {requireListed ? "Pick a course from the list." : "You can still type it."}
             </li>
           ) : (
             matches.map((course, index) => (
@@ -197,12 +213,11 @@ export function CourseTitleAutofill({
   courseTitle: string;
   onFill: (title: string) => void;
 }) {
-  const catalog = useCatalog(accessToken);
+  const catalog = useCourseCatalog(accessToken);
   const lastFilled = useRef("");
 
   useEffect(() => {
-    const id = courseId.trim().toUpperCase().replace(/\s+/g, " ");
-    const match = catalog.find((course) => course.courseId === id);
+    const match = findListedCourse(catalog, courseId);
     const titleIsOurs = courseTitle.trim() === "" || courseTitle === lastFilled.current;
     if (match && titleIsOurs && courseTitle !== match.title) {
       lastFilled.current = match.title;

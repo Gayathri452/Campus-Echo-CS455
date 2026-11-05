@@ -4,7 +4,7 @@ import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invalidateCourseCache, type CatalogCourse } from "../../services/courses";
 import { mockFetch } from "../../test/fetchMock";
-import { CourseIdInput, CourseTitleAutofill, matchCourses } from "./CourseSuggestions";
+import { CourseIdInput, CourseTitleAutofill, findListedCourse, matchCourses, normalizeCourseId } from "./CourseSuggestions";
 
 const course = (courseId: string, title: string, instructor?: string): CatalogCourse => ({
   courseId,
@@ -39,11 +39,41 @@ describe("matchCourses", () => {
   });
 });
 
-function Harness({ accessToken, onPick }: { accessToken?: string; onPick?: (c: CatalogCourse) => void }) {
+describe("findListedCourse", () => {
+  it("matches the listed course ignoring case and extra spaces", () => {
+    expect(normalizeCourseId("  cs   455 ")).toBe("CS 455");
+    expect(findListedCourse(catalog, "cs455")?.courseId).toBe("CS455");
+    expect(findListedCourse(catalog, " CS455 ")?.title).toBe("Software Engineering");
+  });
+
+  // Bug 4: other spellings must not count as the listed course.
+  it("does not treat other spellings or unlisted courses as listed", () => {
+    expect(findListedCourse(catalog, "CS 455")).toBeUndefined();
+    expect(findListedCourse(catalog, "ABC999")).toBeUndefined();
+    expect(findListedCourse(catalog, "   ")).toBeUndefined();
+  });
+});
+
+function Harness({
+  accessToken,
+  onPick,
+  requireListed,
+}: {
+  accessToken?: string;
+  onPick?: (c: CatalogCourse) => void;
+  requireListed?: boolean;
+}) {
   const [value, setValue] = useState("");
   return (
     <>
-      <CourseIdInput accessToken={accessToken} onChange={setValue} onPick={onPick} placeholder="Course ID" value={value} />
+      <CourseIdInput
+        accessToken={accessToken}
+        onChange={setValue}
+        onPick={onPick}
+        placeholder="Course ID"
+        requireListed={requireListed}
+        value={value}
+      />
       <output data-testid="value">{value}</output>
     </>
   );
@@ -94,6 +124,17 @@ describe("CourseIdInput", () => {
     await user.type(screen.getByRole("combobox"), "PHY999");
     expect(await screen.findByText(/No course on the list matches/)).toBeInTheDocument();
     expect(screen.getByTestId("value")).toHaveTextContent("PHY999");
+  });
+
+  it("asks for a listed course when only listed courses are accepted", async () => {
+    mockFetch({ "/api/v1/courses": { body: { courses: catalog } } });
+    const user = userEvent.setup();
+    render(<Harness accessToken="tok" requireListed />);
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+
+    await user.type(screen.getByRole("combobox"), "PHY999");
+    expect(await screen.findByText(/Pick a course from the list\./)).toBeInTheDocument();
+    expect(screen.queryByText(/You can still type it/)).not.toBeInTheDocument();
   });
 
   it("still works as a plain text box when the course list cannot load", async () => {
