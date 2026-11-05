@@ -162,6 +162,25 @@ func TestLoginRejectsInvalidPassword(t *testing.T) {
 	}
 }
 
+func TestLoginUsesSameErrorForUnknownEmail(t *testing.T) {
+	service := NewService(newMemoryRepository())
+	_, err := service.Login(context.Background(), "unknown@iitk.ac.in", "wrong-password")
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("unknown login error = %v, want ErrInvalidCredentials", err)
+	}
+}
+
+func TestRoleSpecificLoginUsesSameErrorForWrongRole(t *testing.T) {
+	repository := newMemoryRepository()
+	service := NewService(repository)
+	if _, err := service.CreateAdministrator(context.Background(), "admin@example.com", "administrator-secure-password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.LoginAs(context.Background(), "admin@example.com", "administrator-secure-password", RoleStudent); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("wrong-role login error = %v, want ErrInvalidCredentials", err)
+	}
+}
+
 func TestLoginRateLimitsRepeatedFailuresAndResetsAfterSuccess(t *testing.T) {
 	repository := newMemoryRepository()
 	service := NewService(repository)
@@ -364,8 +383,12 @@ func TestOTPRegistrationSetsPasswordForLegacyStudent(t *testing.T) {
 	if _, err := service.VerifyOTP(context.Background(), mailer.email, mailer.code); err != nil {
 		t.Fatalf("VerifyOTP() error = %v", err)
 	}
-	if err := service.RequestOTP(context.Background(), "legacy@iitk.ac.in", "another", "another"); !errors.Is(err, ErrEmailAlreadyExists) {
-		t.Fatalf("second registration error = %v, want ErrEmailAlreadyExists", err)
+	previousCode := mailer.code
+	if err := service.RequestOTP(context.Background(), "legacy@iitk.ac.in", "another", "another"); err != nil {
+		t.Fatalf("existing account registration error = %v, want nil", err)
+	}
+	if mailer.code != previousCode {
+		t.Fatal("existing account registration sent an OTP")
 	}
 	if _, err := service.Login(context.Background(), "legacy@iitk.ac.in", "sixsix"); err != nil {
 		t.Fatalf("legacy student login after password setup: %v", err)
