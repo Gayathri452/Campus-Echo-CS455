@@ -1,228 +1,221 @@
-# CampusEcho
+# Roomble
 
-CampusEcho is a privacy-preserving course and faculty feedback system. Students
-can submit feedback anonymously; the planned system also includes automated
-moderation and a human appeal workflow.
+Roomble is a full-stack web application for property discovery and roommate matching. It provides a unified platform for tenants to discover properties and suitable flatmates, while enabling landlords to manage property listings and interact with users.
 
-## Stack
+## Features
 
-- Frontend: React, TypeScript, Vite, and Tailwind CSS
-- Backend: Go HTTP API
-- Database: MongoDB
-- AI triage: Google Gemini API, with an explicit development-only mock for
-  offline testing
+### Property Discovery
+- Search and filter properties based on user preferences
+- View detailed property information
+- Bookmark properties for later access
+- Review and rate properties
+- Landlords can add, edit, list/delist, and delete properties
 
-## Current starter
+### Flatmate Discovery
+- Discover potential flatmates based on profile information and preferences
+- View detailed flatmate profiles
+- Bookmark potential flatmates
+- Explore other landlord and tenant profiles
 
-This repository is a bootstrap, not an implementation of all requirements in
-the deliverables. Its current vertical slice accepts a course ID and feedback
-text from an authenticated student and stores it anonymously in MongoDB with
-the `submitted` status before asynchronous triage. Student login,
-administrator bootstrap, and moderator provisioning are implemented, but
-student enrollment is not verified against an institution. The full gap list
-is in
-[the requirements checklist](./docs/requirements-traceability.md).
+### Authentication & Account Management
+- Separate authentication workflows for tenants and landlords
+- OTP-based verification
+- JWT-based authentication
+- Forgot-password and password-reset workflows
+- Profile creation and profile management
 
-## Run locally
+### Real-Time Communication
+- Real-time messaging between users using Socket.IO
+- Conversation management
+- Chat interface for direct communication
 
-Prerequisites: Go 1.24+, Node.js 18+, npm, and a MongoDB server.
+### User Management
+- Tenant and landlord profiles
+- Profile editing and account management
+- Secure password handling
+- Role-specific application workflows
 
-1. Install MongoDB Community Edition using the
-   [official installation guide](https://www.mongodb.com/docs/manual/administration/install-community/),
-   then start the MongoDB service. The default local connection is
-   `mongodb://localhost:27017`.
+---
 
-2. Create the first administrator account once, from an interactive terminal:
+## Tech Stack
 
-   ```powershell
-   cd backend
-   go run ./cmd/create-admin
-   ```
+### Frontend
+- React
+- Vite
+- JavaScript
+- CSS
 
-   Enter the administrator email and password when prompted; password entry is
-   hidden. The password must be at least 6 characters. This command only
-   creates an administrator and does not reset or reveal existing passwords.
+### Backend
+- Node.js
+- Express.js
+- MongoDB
+- Mongoose
 
-3. Copy the example configuration once. To use Gemini for both AI triage and
-   semantic brigading detection, edit the ignored local `.env` file, set
-   `TRIAGE_PROVIDER=gemini` and `BRIGADING_MODE=gemini`, and paste your key
-   after `GEMINI_API_KEY=`:
+### Communication & Authentication
+- Socket.IO
+- JSON Web Tokens (JWT)
+- OTP verification
+- Nodemailer
 
-   ```powershell
-   Copy-Item .env.example .env
-   notepad .env
-   git check-ignore .env
-   ```
+---
 
-   `git check-ignore` should print `.env`. Get a Gemini API key from
-   [Google AI Studio](https://aistudio.google.com/app/apikey). Keep the key in
-   this local backend `.env` only; do not add it to frontend variables, source
-   files, screenshots, or commits. `.env` is ignored by Git; `.env.example`
-   contains placeholders only.
+## Architecture
 
-   Start the API in one terminal:
+Roomble follows a client-server architecture:
 
-   ```powershell
-   Set-Location backend
-   $env:TRIAGE_PROVIDER = "gemini"
-   go run ./cmd/api
-   ```
+```text
+                    ┌─────────────────────┐
+                    │      React + Vite   │
+                    │      Frontend       │
+                    └──────────┬──────────┘
+                               │
+                         HTTP / REST API
+                               │
+                    ┌──────────▼──────────┐
+                    │   Node.js + Express │
+                    │      Backend        │
+                    └───────┬─────┬───────┘
+                            │     │
+                 ┌──────────▼─┐ ┌─▼────────────┐
+                 │  MongoDB   │ │  Socket.IO   │
+                 │  Database  │ │ Real-time    │
+                 └────────────┘ │ Messaging    │
+                                └───────────────┘
 
-   The API listens on `http://localhost:8080`. Go loads `.env` from the current
-   directory or its parent directory. The example uses console email mode, so
-   local student-registration OTP codes appear in the API terminal. Successful
-   configuration prints the selected models and confirms that the key is
-   present, without printing the key itself. Startup fails clearly if Gemini is
-   selected with an empty key; provider errors are reported in the API terminal.
+roomble-app/
+│
+├── backend/
+│   ├── controllers/
+│   ├── helper_funcs/
+│   ├── middlewares/
+│   ├── models/
+│   ├── routes/
+│   ├── Pictures/
+│   ├── mongodb.js
+│   ├── seed.js
+│   └── index.js
+│
+├── frontend/
+│   ├── public/
+│   └── src/
+│       ├── components/
+│       ├── context/
+│       ├── css/
+│       ├── App.jsx
+│       └── main.jsx
+│
+├── package.json
+├── package-lock.json
+└── README.md
 
-4. In another terminal, start the frontend from the repository root:
+Getting Started
+Prerequisites
 
-   ```powershell
-   cd frontend
-   npm.cmd install
-   $env:CAMPUSECHO_API_TARGET = "http://localhost:8080"
-   npm.cmd run dev
-   ```
+Make sure the following are installed:
 
-   `npm.cmd` avoids PowerShell's script-execution restriction on `npm.ps1`.
-   In macOS/Linux shells, use `npm install` and `npm run dev` instead. Open the
-   local URL printed by Vite. The development server proxies `/api` requests to
-   the Go API; set `CAMPUSECHO_API_TARGET` when using a non-default backend
-   port.
+Node.js
+npm
+MongoDB
+Installation
 
-## Current starter API
+Clone the repository:
 
-- `GET /api/v1/health` — liveness check
-- `POST /api/auth/request-otp` — validate an IITK email and password registration request, then send an OTP
-- `POST /api/auth/verify-otp` — verify the OTP, create the student account, and establish a session
-- `POST /api/auth/student/login` — student-only password login
-- `POST /api/auth/admin/login` — administrator-only password login
-- `POST /api/auth/moderator/login` — moderator-only password login
-- `POST /api/v1/auth/login` — log in; returns a 12-hour bearer session
-- `POST /api/v1/auth/logout` — revoke the bearer session
-- `GET /api/v1/auth/me` — return the signed-in account
-- `POST /api/v1/admin/moderators` — administrator-only moderator provisioning
-- `DELETE /api/v1/admin/moderators/{email}` — administrator-only moderator removal
-- `POST /api/v1/feedback` — student-only anonymous review submission
-- `GET /api/v1/feedback/explore` — student-only published review search and filters
-- `GET /api/v1/feedback/ratings` — student-only published course rating summaries
-- `GET /api/v1/feedback/status/{reference}` — student-only reference status lookup
-- `POST /api/v1/feedback/status/{reference}/appeal` — appeal a flagged or rejected review
+git clone https://github.com/Vaishnavi0090/roomble-app.git
+cd roomble-app
+Install Backend Dependencies
+cd backend
+npm install
+Install Frontend Dependencies
 
-### Local AI triage configuration
+Open a new terminal:
 
-The example environment selects `TRIAGE_PROVIDER=gemini`. Provide
-`GEMINI_API_KEY` in the ignored local `.env` or the backend process environment
-to use Gemini for text classification. The deterministic `development-mock`
-is still available for offline tests; it is **not real AI** and is rejected
-when `APP_ENV` is not `development`.
-
-`GEMINI_MODEL` defaults to `gemini-3.5-flash-lite`. Gemini models and free-tier
-eligibility can change; check Google's [model list](https://ai.google.dev/gemini-api/docs/models),
-[pricing](https://ai.google.dev/gemini-api/docs/pricing), and the model's
-availability in your Google AI Studio project before use. The free tier has
-model-specific rate limits and is limited to eligible models. Do not enable
-billing if you want to avoid paid usage. Google may use Gemini Free Tier
-requests to improve its products; review Google's current
-[API terms](https://ai.google.dev/gemini-api/terms) before sending real student
-feedback. Only review text is sent to Gemini;
-student identity, authentication data, and ratings are not sent. The backend
-requests JSON-schema output and validates the decision, reason code, and
-explanation. Strong criticism, negative sentiment, and low ratings alone must
-not be flagged.
-
-To enable FR-8 semantic brigading detection, also set
-`BRIGADING_MODE=gemini`. The detector considers reviews in a rolling ten-minute
-window for the same course, excludes reviews with five or fewer words, and
-flags the eligible batch only when there are more than 15 reviews and the
-average pairwise Gemini embedding cosine similarity is strictly above 75%.
-It uses `GEMINI_EMBEDDING_MODEL` (default `gemini-embedding-001`) and stores
-embeddings with the feedback record so later checks do not repeatedly call the
-embedding API. Changing the configured embedding model causes vectors to be
-regenerated. Embedding requests send review text to Google; apply the same
-privacy and provider-terms considerations as for Gemini classification.
-`BRIGADING_MODE=development-noop` remains available for local tests that should
-not call the embedding API, but it does not implement FR-8.
-
-For opt-in Gemini smoke tests (one classification request and one embedding
-request), open a PowerShell terminal in `backend`. This loads the key into that
-terminal's process environment without printing it, then runs both tests:
-
-```powershell
-$settings = Get-Content ..\.env
-$keyLine = $settings | Where-Object { $_ -match '^GEMINI_API_KEY=' } | Select-Object -First 1
-$env:GEMINI_API_KEY = (($keyLine -split '=', 2)[1]).Trim().Trim('"')
-$modelLine = $settings | Where-Object { $_ -match '^GEMINI_MODEL=' } | Select-Object -First 1
-$env:GEMINI_MODEL = (($modelLine -split '=', 2)[1]).Trim().Trim('"')
-$embeddingModelLine = $settings | Where-Object { $_ -match '^GEMINI_EMBEDDING_MODEL=' } | Select-Object -First 1
-$env:GEMINI_EMBEDDING_MODEL = (($embeddingModelLine -split '=', 2)[1]).Trim().Trim('"')
-$env:GEMINI_SMOKE_TEST = "1"
-go test ./internal/triage -run 'TestGemini(Provider|SemanticEmbedder)Smoke' -v
-Remove-Item Env:GEMINI_API_KEY, Env:GEMINI_MODEL, Env:GEMINI_EMBEDDING_MODEL, Env:GEMINI_SMOKE_TEST
-Remove-Variable settings, keyLine, modelLine, embeddingModelLine
-```
-
-The normal test suites use fake providers and make no Gemini requests. To
-exercise the actual website, keep the backend running as above, start the
-frontend in a second terminal, sign in, submit a review, then open Track status
-and refresh using its reference code. Classification runs asynchronously; the
-final status and saved flag reason appear there.
-
-`TRIAGE_WORKERS`, `TRIAGE_QUEUE_SIZE`, `TRIAGE_MAX_RETRIES`,
-`TRIAGE_RETRY_BACKOFF`, `TRIAGE_PROCESSING_TIMEOUT`,
-`TRIAGE_RECOVERY_INTERVAL`, and `TRIAGE_LEASE_DURATION` configure the worker
-pool and processing recovery. `TRIAGE_DUPLICATE_THRESHOLD` configures the
-word-similarity threshold (default `0.82`; separate from brigading thresholds).
-Pending `submitted` reviews are rediscovered from MongoDB after startup and
-periodically, so a full in-memory queue does not lose persisted submissions.
-
-`BRIGADING_MODE=development-noop` is accepted only with
-`APP_ENV=development`; it intentionally disables brigading detection.
-
-Review submissions accept:
-
-  ```json
-  {
-    "courseId": "CS455",
-      "courseTitle": "Software Engineering",
-      "category": "teaching",
-      "rating": 4,
-    "content": "The weekly examples helped me understand the material."
-  }
-  ```
-
-Authenticated endpoints use `Authorization: Bearer <accessToken>`. The React
-starter keeps the token in memory; reloading the page signs the user out. User
-credentials and sessions are stored separately from feedback, and passwords
-are bcrypt-hashed. The initial administrator is created with the interactive
-command above. Student registration currently checks email syntax only; it
-does not verify college enrollment or a college email domain. Add that
-institutional verification before relying on registration outside local
-development.
-
-The feedback endpoint responds with HTTP 201, an anonymous reference code, and
-the initial `submitted` status. Classification, duplicate detection, and
-configured brigading checks happen in the background; use the Track status view
-to retrieve the latest state and any saved flag reason.
-
-The local Go server uses HTTP. Do not deploy it publicly without HTTPS; use a
-TLS-terminating reverse proxy or the approved cloud platform's HTTPS service.
-
-## Tests
-
-From the repository root, run backend unit tests with:
-
-```powershell
-Set-Location backend
-go test ./...
-```
-
-Run frontend unit and component tests (Vitest + React Testing Library) with:
-
-```powershell
 cd frontend
-npm test
-```
+npm install
+Environment Variables
 
-Frontend scripts are defined in `frontend/package.json`. Integration-test setup
-is documented in [tests/integration/README.md](./tests/integration/README.md).
+The backend uses environment variables for database access, authentication and email configuration.
+
+Create a .env file inside the backend directory:
+
+MONGODB_URI=your_mongodb_connection_string
+SECRET_KEY=your_secret_key
+EMAIL_USER=your_email
+EMAIL_APP_PASSWORD=your_email_app_password
+
+Do not commit .env files or real credentials to the repository.
+
+Running the Application
+Start the Backend
+
+From the backend directory:
+
+node index.js
+Start the Frontend
+
+From the frontend directory:
+
+npm run dev
+
+The frontend will be available at the local development URL provided by Vite.
+
+Application Modules
+
+The application is organized around two primary user roles:
+
+Tenant
+
+Tenants can:
+
+Search for properties
+Discover potential flatmates
+Bookmark properties and flatmates
+View and manage their profile
+Review properties
+Communicate with other users
+Landlord
+
+Landlords can:
+
+Create property listings
+Update property information
+List or delist properties
+Delete properties
+Manage their profile
+Interact with users through the messaging system
+Key Backend Components
+
+The backend is organized into modular routes, models, middleware and helper functions.
+
+Models
+
+MongoDB/Mongoose models manage entities such as:
+
+Tenants
+Landlords
+Properties
+Reviews
+Conversations
+OTP records
+Towns
+API Routes
+
+Dedicated routes handle:
+
+Authentication
+Property management
+Property search
+Reviews
+Bookmarks
+User profiles
+Password management
+Messaging
+Development
+
+The frontend is built using reusable React components, while the backend exposes RESTful APIs for application functionality.
+
+The application uses Socket.IO to support real-time communication between users.
+
+
+
+
+

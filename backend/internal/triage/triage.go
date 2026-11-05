@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/Kishore200524/CS455-Project/backend/internal/feedback"
 )
@@ -20,6 +21,8 @@ const (
 	DefaultQueueSize          = 64
 	DefaultRetryBackoff       = 2 * time.Second
 	DefaultDuplicateThreshold = 0.82
+	MinDuplicateReviewWords   = 6
+	DuplicateHistoryLimit     = 200
 	BrigadingWindow           = 10 * time.Minute
 	BrigadingReviewThreshold  = 15
 	BrigadingSimilarityLimit  = 0.75
@@ -128,6 +131,7 @@ type WorkerPool struct {
 	enqueueRetry func(context.Context, Job) error
 	onFailure    func(context.Context, Job, error)
 	wg           sync.WaitGroup
+	retryWG      sync.WaitGroup
 	stopOnce     sync.Once
 	mu           sync.RWMutex
 	stopped      bool
@@ -213,27 +217,35 @@ func (p *WorkerPool) worker(ctx context.Context) {
 					if p.prepareRetry != nil {
 						p.prepareRetry(retry)
 					}
-					if err := waitBackoff(ctx, p.backoff, retry.Attempt); err != nil {
-						return
-					}
-					enqueue := p.enqueueRetry
-					if enqueue == nil {
-						enqueue = p.Enqueue
-					}
-					if err := enqueue(ctx, retry); err != nil && !errors.Is(err, ErrQueueFull) {
-						if p.onFailure != nil {
-							p.onFailure(ctx, retry, err)
-						}
-						log.Printf("triage retry could not be queued: review_id=%s error=%v", job.ReviewID, err)
-					} else if errors.Is(err, ErrQueueFull) {
-						log.Printf("triage retry deferred to pending-review recovery: review_id=%s", job.ReviewID)
-					}
+					p.scheduleRetry(ctx, retry)
 				} else if p.onFailure != nil {
 					p.onFailure(ctx, Job{ReviewID: job.ReviewID, Attempt: attempt}, err)
 				}
 			}
 		}
 	}
+}
+
+func (p *WorkerPool) scheduleRetry(ctx context.Context, retry Job) {
+	p.retryWG.Add(1)
+	go func() {
+		defer p.retryWG.Done()
+		if err := waitBackoff(ctx, p.backoff, retry.Attempt); err != nil {
+			return
+		}
+		enqueue := p.enqueueRetry
+		if enqueue == nil {
+			enqueue = p.Enqueue
+		}
+		if err := enqueue(ctx, retry); err != nil && !errors.Is(err, ErrQueueFull) {
+			if p.onFailure != nil {
+				p.onFailure(ctx, retry, err)
+			}
+			log.Printf("triage retry could not be queued: review_id=%s error=%v", retry.ReviewID, err)
+		} else if errors.Is(err, ErrQueueFull) {
+			log.Printf("triage retry deferred to pending-review recovery: review_id=%s", retry.ReviewID)
+		}
+	}()
 }
 
 func waitBackoff(ctx context.Context, base time.Duration, attempt int) error {
@@ -269,6 +281,7 @@ func (p *WorkerPool) Stop() {
 		p.cancel()
 		p.mu.Unlock()
 		p.wg.Wait()
+		p.retryWG.Wait()
 	})
 }
 
@@ -572,7 +585,7 @@ func (s *Service) processJob(parent context.Context, job Job) error {
 		}
 	}
 
-	recent, err := s.store.ListRecentByCourse(ctx, review.CourseID, 0)
+	recent, err := s.store.ListRecentByCourse(ctx, review.CourseID, DuplicateHistoryLimit)
 	if err != nil {
 		return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
 	}
@@ -763,6 +776,12 @@ func NewSimilarityDuplicateDetector(threshold float64) DuplicateDetector {
 }
 
 func (d *similarityDetector) Detect(ctx context.Context, review feedback.Feedback, previous []feedback.Feedback) (DuplicateResult, error) {
+	if err := ctx.Err(); err != nil {
+		return DuplicateResult{}, err
+	}
+	if duplicateWordCount(review.Content) < MinDuplicateReviewWords {
+		return DuplicateResult{ReasonCode: "not_duplicate"}, nil
+	}
 	for _, candidate := range previous {
 		if err := ctx.Err(); err != nil {
 			return DuplicateResult{}, err
@@ -774,6 +793,9 @@ func (d *similarityDetector) Detect(ctx context.Context, review feedback.Feedbac
 			continue
 		}
 		if !isEarlierReview(candidate, review) {
+			continue
+		}
+		if duplicateWordCount(candidate.Content) < MinDuplicateReviewWords {
 			continue
 		}
 		similarity := textSimilarity(review.Content, candidate.Content)
@@ -854,18 +876,23 @@ func tokenCounts(text string) map[string]float64 {
 func normalizeText(text string) string {
 	lower := strings.ToLower(text)
 	lower = strings.Map(func(char rune) rune {
-		switch {
-		case char >= 'a' && char <= 'z':
+		if unicode.IsLetter(char) || unicode.IsNumber(char) || unicode.IsMark(char) {
 			return char
-		case char >= '0' && char <= '9':
-			return char
-		case char == ' ' || char == '\n' || char == '\t':
-			return ' '
-		default:
+		}
+		if unicode.IsSpace(char) {
 			return ' '
 		}
+		return ' '
 	}, lower)
 	return strings.Join(strings.Fields(lower), " ")
+}
+
+func duplicateWordCount(text string) int {
+	normalized := normalizeText(text)
+	if normalized == "" {
+		return 0
+	}
+	return len(strings.Fields(normalized))
 }
 
 func prioritizeReviews(reviews []feedback.Feedback) []feedback.Feedback {
