@@ -217,5 +217,12 @@ Set-Location backend
 go test ./...
 ```
 
+Run frontend unit and component tests (Vitest + React Testing Library) with:
+
+```powershell
+cd frontend
+npm test
+```
+
 Frontend scripts are defined in `frontend/package.json`. Integration-test setup
 is documented in [tests/integration/README.md](./tests/integration/README.md).
