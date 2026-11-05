@@ -172,7 +172,11 @@ final status and saved flag reason appear there.
 `TRIAGE_RETRY_BACKOFF`, `TRIAGE_PROCESSING_TIMEOUT`,
 `TRIAGE_RECOVERY_INTERVAL`, and `TRIAGE_LEASE_DURATION` configure the worker
 pool and processing recovery. `TRIAGE_DUPLICATE_THRESHOLD` configures the
-word-similarity threshold (default `0.82`; separate from brigading thresholds).
+Unicode-aware word-similarity threshold (default `0.82`; separate from
+brigading thresholds). Individual duplicate checks require at least six words
+in both reviews to avoid treating generic short comments as copies, and compare
+against at most the latest 200 same-course reviews. Retry backoff is scheduled
+asynchronously, so waiting for a retry does not occupy a worker.
 Pending `submitted` reviews are rediscovered from MongoDB after startup and
 periodically, so a full in-memory queue does not lose persisted submissions.
 
@@ -215,7 +219,14 @@ From the repository root, run backend unit tests with:
 ```powershell
 Set-Location backend
 go test ./...
+go test -race ./internal/triage
+go test ./internal/triage -run '^$' -bench 'Benchmark(Duplicate|Brigading)' -benchmem -count=5
+go test ./internal/triage -coverprofile=triage-coverage.out
+go tool cover -func=triage-coverage.out
 ```
 
-Frontend scripts are defined in `frontend/package.json`. Integration-test setup
-is documented in [tests/integration/README.md](./tests/integration/README.md).
+The triage benchmarks measure duplicate comparison against the latest 200
+reviews and pairwise brigading similarity at several cohort sizes. They are
+algorithm microbenchmarks, not end-to-end load tests. Frontend scripts are
+defined in `frontend/package.json`. Integration-test setup is documented in
+[tests/integration/README.md](./tests/integration/README.md).
