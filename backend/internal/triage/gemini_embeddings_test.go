@@ -113,6 +113,41 @@ func TestGeminiSemanticEmbedderClassifiesAPIStatusRetries(t *testing.T) {
 	}
 }
 
+func TestGeminiSemanticEmbedderConfigurationAndInputLimits(t *testing.T) {
+	if _, err := NewGeminiSemanticEmbedder(" ", "", time.Second); !errors.Is(err, ErrGeminiProviderNotConfigured) {
+		t.Fatalf("NewGeminiSemanticEmbedder() error = %v, want missing-configuration error", err)
+	}
+	embedder, err := NewGeminiSemanticEmbedder("synthetic-test-key", "", 0)
+	if err != nil {
+		t.Fatalf("NewGeminiSemanticEmbedder() error = %v", err)
+	}
+	if embedder.Model() != DefaultGeminiEmbeddingModel || embedder.timeout != DefaultProcessTimeout {
+		t.Fatalf("embedder defaults = model %q timeout %s", embedder.Model(), embedder.timeout)
+	}
+
+	if _, err := (&GeminiSemanticEmbedder{}).Embed(context.Background(), []string{"review"}); !errors.Is(err, ErrGeminiProviderNotConfigured) {
+		t.Fatalf("unconfigured Embed() error = %v, want missing-configuration error", err)
+	}
+	vectors, err := embedder.Embed(context.Background(), nil)
+	if err != nil || len(vectors) != 0 {
+		t.Fatalf("empty Embed() = (%v, %v), want an empty result", vectors, err)
+	}
+	tooMany := make([]string, maxEmbeddingBatchSize+1)
+	if _, err := embedder.Embed(context.Background(), tooMany); err == nil {
+		t.Fatal("Embed() accepted a batch above the documented limit")
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	embedder = &GeminiSemanticEmbedder{
+		client: &fakeGeminiEmbeddingClient{err: context.Canceled},
+		model:  DefaultGeminiEmbeddingModel, timeout: time.Second,
+	}
+	if _, err := embedder.Embed(canceled, []string{"review"}); err == nil || !strings.Contains(err.Error(), "canceled") {
+		t.Fatalf("canceled Embed() error = %v, want a canceled-provider failure", err)
+	}
+}
+
 func TestGeminiSemanticEmbedderSmoke(t *testing.T) {
 	if testing.Short() || getenv("GEMINI_SMOKE_TEST") != "1" {
 		t.Skip("set GEMINI_SMOKE_TEST=1 to make a real Gemini embedding request")

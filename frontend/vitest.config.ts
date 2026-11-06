@@ -12,7 +12,14 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       reportOnFailure: true,
-      include: ["src/pages/moderator/**", "src/services/appeals*.ts"],
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: [
+        "src/**/*.test.{ts,tsx}",
+        "src/**/*.spec.{ts,tsx}",
+        "src/**/*.d.ts",
+        "src/test/**",
+        "src/main.tsx",
+      ],
       reporter: ["text", "html"],
     },
   },

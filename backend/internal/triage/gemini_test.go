@@ -137,12 +137,19 @@ func TestGeminiProviderReportsMissingConfigurationAndProviderErrors(t *testing.T
 	if _, err := NewGeminiProvider("", "", time.Second); !errors.Is(err, ErrGeminiProviderNotConfigured) {
 		t.Fatalf("NewGeminiProvider() error = %v, want missing-configuration error", err)
 	}
+	configured, err := NewGeminiProvider("synthetic-test-key", "", 0)
+	if err != nil {
+		t.Fatalf("NewGeminiProvider() error = %v", err)
+	}
+	if configured.model != defaultGeminiModel || configured.timeout != 20*time.Second {
+		t.Fatalf("Gemini provider defaults = model %q timeout %s", configured.model, configured.timeout)
+	}
 
 	secret := "AIza0123456789012345678901234567890123"
 	provider := newGeminiProviderWithClient(&fakeGeminiClient{
 		err: errors.New(secret),
 	}, "", time.Second)
-	_, err := provider.Classify(context.Background(), feedback.Feedback{Content: "Review"})
+	_, err = provider.Classify(context.Background(), feedback.Feedback{Content: "Review"})
 	if err == nil || !strings.Contains(err.Error(), "Gemini API request failed") {
 		t.Fatalf("Classify() error = %v, want a clear Gemini API error", err)
 	}

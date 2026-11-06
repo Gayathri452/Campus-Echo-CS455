@@ -40,3 +40,9 @@ data/
 # Editor/IDE
 # .idea/
 .vscode/
+
+# Generated test coverage reports
+/backend/coverage
+/backend/coverage.out
+/backend/coverage.html
+/frontend/coverage/
