@@ -582,6 +582,39 @@ func TestStudentAppealCreatesModeratorQueueTicket(t *testing.T) {
 	if resolved.Status != feedback.StatusPublished || resolved.AppealStatus != appeals.StatusRestored {
 		t.Fatalf("resolved review status = %q, appeal status = %q; want published/restored", resolved.Status, resolved.AppealStatus)
 	}
+	if resolved.PublishedAt == nil || resolved.FlagReason != "" {
+		t.Fatalf("restored review publishedAt = %v, flagReason = %q; want a publish date and no flag reason", resolved.PublishedAt, resolved.FlagReason)
+	}
+}
+
+func TestResolveAppealDoesNotResolveTicketWhenReviewIsMissing(t *testing.T) {
+	store, ctx := queueIntegrationMongo(t)
+	ticket := queueTicketFields(appeals.StatusUnderAppeal, time.Now().UTC())
+	ticket["reviewId"] = primitive.NewObjectID().Hex()
+	ticketID := queueInsertTicket(t, ctx, store.appealCollection, ticket)
+
+	const moderatorID = "missing-review-moderator"
+	claimed, err := store.Claim(ctx, ticketID, moderatorID)
+	if err != nil {
+		t.Fatalf("claim appeal: %v", err)
+	}
+	if err := store.Resolve(ctx, claimed.ID, moderatorID, appeals.ActionRestore, ""); !errors.Is(err, appeals.ErrNotFound) {
+		t.Fatalf("resolve appeal with missing review error = %v, want %v", err, appeals.ErrNotFound)
+	}
+
+	var resolved struct {
+		Status string `bson:"status"`
+	}
+	id, err := primitive.ObjectIDFromHex(claimed.ID)
+	if err != nil {
+		t.Fatalf("parse appeal ID: %v", err)
+	}
+	if err := store.appealCollection.FindOne(ctx, bson.M{"_id": id}).Decode(&resolved); err != nil {
+		t.Fatalf("read appeal after failed resolution: %v", err)
+	}
+	if resolved.Status != appeals.StatusLocked {
+		t.Fatalf("appeal status after failed resolution = %q, want %q", resolved.Status, appeals.StatusLocked)
+	}
 }
 
 func TestDeletedAppealIsRetainedThenPurged(t *testing.T) {

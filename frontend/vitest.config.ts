@@ -8,5 +8,12 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     restoreMocks: true,
+    include: ["src/**/*.test.{ts,tsx}"],
+    coverage: {
+      provider: "v8",
+      reportOnFailure: true,
+      include: ["src/pages/moderator/**", "src/services/appeals*.ts"],
+      reporter: ["text", "html"],
+    },
   },
 });

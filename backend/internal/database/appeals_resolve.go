@@ -137,58 +137,67 @@ func (m *Mongo) Resolve(ctx context.Context, ticketID, moderatorID, action, comm
 	if err != nil {
 		return appeals.ErrNotLockHolder
 	}
-	var ticket struct {
-		ReviewID string `bson:"reviewId"`
-	}
 	now := time.Now().UTC()
 	filter := activeLockFilter(id, moderatorID, now)
-	if err := m.appealCollection.FindOne(ctx, filter).Decode(&ticket); err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return appeals.ErrNotLockHolder
-		}
-		return fmt.Errorf("read appeal before resolving: %w", err)
-	}
-	reviewID, err := primitive.ObjectIDFromHex(ticket.ReviewID)
-	if err != nil {
-		return fmt.Errorf("invalid review ID on appeal ticket: %w", err)
-	}
 	status := appeals.StatusRestored
 	reviewStatus := feedback.StatusPublished
 	if action == appeals.ActionDelete {
 		status = appeals.StatusDeleted
 		reviewStatus = feedback.StatusDeleted
 	}
-	result, err := m.appealCollection.UpdateOne(ctx, filter, bson.M{
-		"$set": bson.M{
-			"status": status, "resolutionComment": comment, "resolvedAt": now,
-		},
-	})
+	session, err := m.client.StartSession()
 	if err != nil {
-		return fmt.Errorf("resolve appeal ticket: %w", err)
+		return fmt.Errorf("start appeal resolution session: %w", err)
 	}
-	if result.MatchedCount == 0 {
-		return appeals.ErrNotLockHolder
-	}
-	reviewResult, err := m.feedbackCollection.UpdateOne(ctx, bson.M{"_id": reviewID}, bson.M{
-		"$set": bson.M{"status": reviewStatus},
-	})
-	if err == nil && reviewResult.MatchedCount == 0 {
-		err = mongo.ErrNoDocuments
-	}
-	if err != nil {
-		_, rollbackErr := m.appealCollection.UpdateOne(ctx, bson.M{
-			"_id": id, "status": status, "resolvedAt": now,
-		}, bson.M{
-			"$set":   bson.M{"status": appeals.StatusLocked},
-			"$unset": bson.M{"resolutionComment": "", "resolvedAt": ""},
+	defer session.EndSession(ctx)
+
+	_, err = session.WithTransaction(ctx, func(txCtx mongo.SessionContext) (interface{}, error) {
+		var ticket struct {
+			ReviewID string `bson:"reviewId"`
+		}
+		if err := m.appealCollection.FindOne(txCtx, filter).Decode(&ticket); err != nil {
+			if errors.Is(err, mongo.ErrNoDocuments) {
+				return nil, appeals.ErrNotLockHolder
+			}
+			return nil, fmt.Errorf("read appeal before resolving: %w", err)
+		}
+		reviewID, err := primitive.ObjectIDFromHex(ticket.ReviewID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid review ID on appeal ticket: %w", err)
+		}
+
+		result, err := m.appealCollection.UpdateOne(txCtx, filter, bson.M{
+			"$set": bson.M{
+				"status": status, "resolutionComment": comment, "resolvedAt": now,
+			},
 		})
-		if rollbackErr != nil {
-			return fmt.Errorf("update review: %v; restore appeal lock: %w", err, rollbackErr)
+		if err != nil {
+			return nil, fmt.Errorf("resolve appeal ticket: %w", err)
 		}
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return appeals.ErrNotFound
+		if result.MatchedCount == 0 {
+			return nil, appeals.ErrNotLockHolder
 		}
-		return fmt.Errorf("update review status: %w", err)
+
+		reviewSet := bson.M{"status": reviewStatus}
+		reviewUpdate := bson.M{"$set": reviewSet}
+		if action == appeals.ActionRestore {
+			reviewSet["publishedAt"] = now
+			reviewUpdate["$unset"] = bson.M{"flagReason": ""}
+		}
+		reviewResult, err := m.feedbackCollection.UpdateOne(txCtx, bson.M{"_id": reviewID}, reviewUpdate)
+		if err != nil {
+			return nil, fmt.Errorf("update review status: %w", err)
+		}
+		if reviewResult.MatchedCount == 0 {
+			return nil, appeals.ErrNotFound
+		}
+		return nil, nil
+	})
+	if err != nil {
+		if errors.Is(err, appeals.ErrNotLockHolder) || errors.Is(err, appeals.ErrNotFound) {
+			return err
+		}
+		return fmt.Errorf("resolve appeal transaction: %w", err)
 	}
 	return nil
 }
