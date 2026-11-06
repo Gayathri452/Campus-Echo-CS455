@@ -30,11 +30,13 @@ function isCourse(value: unknown): value is CatalogCourse {
 
 async function request(
   path: string,
-  accessToken: string,
+  accessToken: string | undefined,
   init: { method: "GET" | "POST" | "DELETE"; body?: unknown },
   fallback: string,
 ): Promise<unknown> {
-  const headers: Record<string, string> = { Authorization: `Bearer ${accessToken}` };
+  // With a cookie-restored session there is no access token in memory; the
+  // HttpOnly session cookie (credentials: "same-origin") authenticates instead.
+  const headers: Record<string, string> = accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
   if (init.body !== undefined) headers["Content-Type"] = "application/json";
   const response = await fetch(path, {
     method: init.method,
@@ -56,7 +58,7 @@ async function request(
 }
 
 /** GET /api/v1/courses — the whole catalog (up to 500), sorted by course ID. */
-export async function listCourses(accessToken: string, search = ""): Promise<CatalogCourse[]> {
+export async function listCourses(accessToken?: string, search = ""): Promise<CatalogCourse[]> {
   const params = new URLSearchParams();
   if (search.trim()) params.set("search", search.trim());
   const query = params.toString();
@@ -99,18 +101,21 @@ export async function deleteCourse(accessToken: string, courseId: string): Promi
 // The student pages show the same catalog in several dropdowns, so one fetch
 // per minute is shared between them.
 const cacheLifetimeMs = 60_000;
+// The catalog is the same for every signed-in user, so a cookie session
+// (no token) can share the cache under the key "".
 let cache: { token: string; fetchedAt: number; promise: Promise<CatalogCourse[]> } | null = null;
 
-export function getCachedCourses(accessToken: string): Promise<CatalogCourse[]> {
+export function getCachedCourses(accessToken?: string): Promise<CatalogCourse[]> {
+  const token = accessToken ?? "";
   const now = Date.now();
-  if (cache && cache.token === accessToken && now - cache.fetchedAt < cacheLifetimeMs) {
+  if (cache && cache.token === token && now - cache.fetchedAt < cacheLifetimeMs) {
     return cache.promise;
   }
   const promise = listCourses(accessToken).catch((error: unknown) => {
     cache = null;
     throw error;
   });
-  cache = { token: accessToken, fetchedAt: now, promise };
+  cache = { token, fetchedAt: now, promise };
   return promise;
 }
 

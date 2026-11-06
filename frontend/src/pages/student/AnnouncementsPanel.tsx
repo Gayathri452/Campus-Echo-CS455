@@ -34,8 +34,9 @@ function AnnouncementsPanel({ accessToken, ownerId }: AnnouncementsPanelProps) {
   const [dismissed, setDismissed] = useState<string[]>(() => loadDismissed(ownerId));
   const [showHidden, setShowHidden] = useState(false);
 
+  // Load even without an access token: after a page refresh the session is
+  // restored from the HttpOnly cookie, which the request still sends.
   useEffect(() => {
-    if (!accessToken) return;
     let cancelled = false;
     listAnnouncements(accessToken)
       .then((result) => {

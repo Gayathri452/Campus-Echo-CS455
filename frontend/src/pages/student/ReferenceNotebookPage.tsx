@@ -102,8 +102,10 @@ function ReferenceNotebookPage({ ownerId, accessToken, onTrack }: ReferenceNoteb
   }
 
   // Refresh codes that have not been checked recently when the page opens.
+  // This must not wait for an access token: a cookie-restored session has
+  // none, and getReviewStatus authenticates with the session cookie instead.
   useEffect(() => {
-    if (!autoChecked.current && accessToken) {
+    if (!autoChecked.current) {
       autoChecked.current = true;
       void checkAll(true);
     }

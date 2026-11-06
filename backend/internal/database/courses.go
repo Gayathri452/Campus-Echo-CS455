@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"time"
@@ -94,4 +95,21 @@ func (m *Mongo) DeleteCourse(ctx context.Context, courseID string) error {
 	return nil
 }
 
-var _ courses.Store = (*Mongo)(nil)
+// FindCourse returns the catalog course with this normalized course ID, or
+// courses.ErrCourseNotFound when it is not listed.
+func (m *Mongo) FindCourse(ctx context.Context, courseID string) (courses.Course, error) {
+	var course courses.Course
+	err := m.courseCollection().FindOne(ctx, bson.M{"courseId": courseID}).Decode(&course)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return courses.Course{}, courses.ErrCourseNotFound
+	}
+	if err != nil {
+		return courses.Course{}, fmt.Errorf("find course: %w", err)
+	}
+	return course, nil
+}
+
+var (
+	_ courses.Store  = (*Mongo)(nil)
+	_ courses.Finder = (*Mongo)(nil)
+)
