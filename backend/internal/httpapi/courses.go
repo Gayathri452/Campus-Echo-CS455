@@ -2,7 +2,7 @@ package httpapi
 
 // Course catalog: administrators define the list of courses, and every
 // signed-in user can read it so the student pages can suggest courses in a
-// dropdown. The catalog is advisory: review submission does not check it.
+// dropdown. Review submission accepts only listed courses (createFeedback).
 //
 //	GET    /api/v1/courses?search=cs&limit=50   any signed-in user
 //	POST   /api/v1/admin/courses                administrator

@@ -52,14 +52,17 @@ func (m *memoryAuthRepository) CreateOTP(_ context.Context, challenge auth.OTPCh
 	return nil
 }
 
-func (m *memoryAuthRepository) IncrementOTPAttempts(_ context.Context, email string) (int, error) {
+func (m *memoryAuthRepository) ReserveOTPAttempt(_ context.Context, email string, now time.Time) (auth.OTPChallenge, error) {
 	challenge, exists := m.otps[email]
-	if !exists {
-		return 0, auth.ErrInvalidOTP
+	if !exists || now.After(challenge.ExpiresAt) {
+		return auth.OTPChallenge{}, auth.ErrInvalidOTP
+	}
+	if challenge.Attempts >= auth.OTPMaxAttempts {
+		return auth.OTPChallenge{}, auth.ErrOTPAttempts
 	}
 	challenge.Attempts++
 	m.otps[email] = challenge
-	return challenge.Attempts, nil
+	return challenge, nil
 }
 
 func (m *memoryAuthRepository) DeleteOTP(_ context.Context, email string) error {
@@ -138,7 +141,7 @@ func TestProtectedRoutesRequireRole(t *testing.T) {
 	handler := NewServer(nil, service)
 
 	noToken := httptest.NewRequest(http.MethodPost, "/api/v1/admin/moderators", strings.NewReader(
-		`{"email":"moderator@college.edu","password":"long-secure-password"}`,
+		`{"email":"moderator@college.edu","password":"moderator-secure-password"}`,
 	))
 	noTokenResponse := httptest.NewRecorder()
 	handler.ServeHTTP(noTokenResponse, noToken)
@@ -172,22 +175,22 @@ func TestRoleSpecificLoginRejectsWrongRole(t *testing.T) {
 	if _, err := service.RegisterStudent(context.Background(), "student@iitk.ac.in", "studentpass"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.ProvisionModerator(context.Background(), "moderator@example.com", "modpass1"); err != nil {
+	if _, err := service.ProvisionModerator(context.Background(), "moderator@example.com", "moderator-secure-password"); err != nil {
 		t.Fatal(err)
 	}
 	handler := NewServer(nil, service)
 
 	wrongRole := httptest.NewRequest(http.MethodPost, "/api/auth/student/login", strings.NewReader(
-		`{"email":"moderator@example.com","password":"modpass1"}`,
+		`{"email":"moderator@example.com","password":"moderator-secure-password"}`,
 	))
 	wrongRoleResponse := httptest.NewRecorder()
 	handler.ServeHTTP(wrongRoleResponse, wrongRole)
-	if wrongRoleResponse.Code != http.StatusForbidden {
-		t.Fatalf("wrong-role status = %d, want %d", wrongRoleResponse.Code, http.StatusForbidden)
+	if wrongRoleResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong-role status = %d, want %d", wrongRoleResponse.Code, http.StatusUnauthorized)
 	}
 
 	correctRole := httptest.NewRequest(http.MethodPost, "/api/auth/moderator/login", strings.NewReader(
-		`{"email":"moderator@example.com","password":"modpass1"}`,
+		`{"email":"moderator@example.com","password":"moderator-secure-password"}`,
 	))
 	correctRoleResponse := httptest.NewRecorder()
 	handler.ServeHTTP(correctRoleResponse, correctRole)
@@ -243,14 +246,14 @@ func TestAdministratorCanProvisionModerator(t *testing.T) {
 func TestOnlyAdministratorCanRemoveModerator(t *testing.T) {
 	repository := newMemoryAuthRepository()
 	service := auth.NewService(repository)
-	if _, err := service.CreateAdministrator(context.Background(), "admin@example.com", "adminpass"); err != nil {
+	if _, err := service.CreateAdministrator(context.Background(), "admin@example.com", "administrator-secure-password"); err != nil {
 		t.Fatal(err)
 	}
-	moderator, err := service.ProvisionModerator(context.Background(), "moderator@example.com", "modpass1")
+	moderator, err := service.ProvisionModerator(context.Background(), "moderator@example.com", "moderator-secure-password")
 	if err != nil {
 		t.Fatal(err)
 	}
-	adminSession, err := service.Login(context.Background(), "admin@example.com", "adminpass")
+	adminSession, err := service.Login(context.Background(), "admin@example.com", "administrator-secure-password")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +266,7 @@ func TestOnlyAdministratorCanRemoveModerator(t *testing.T) {
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("remove status = %d, want %d: %s", response.Code, http.StatusNoContent, response.Body.String())
 	}
-	if _, err := service.Login(context.Background(), moderator.Email, "modpass1"); !errors.Is(err, auth.ErrInvalidCredentials) {
+	if _, err := service.Login(context.Background(), moderator.Email, "moderator-secure-password"); !errors.Is(err, auth.ErrInvalidCredentials) {
 		t.Fatalf("removed moderator login error = %v, want ErrInvalidCredentials", err)
 	}
 }

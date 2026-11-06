@@ -40,6 +40,12 @@ type appealSummaryDoc struct {
 }
 
 func summaryFromDoc(doc appealSummaryDoc) appeals.Summary {
+	lockExpiresAt := doc.LockExpiresAt
+	if lockExpiresAt == nil && doc.Status == appeals.StatusLocked && doc.LockedAt != nil {
+		expiry := doc.LockedAt.Add(appeals.LockDuration)
+		lockExpiresAt = &expiry
+	}
+
 	return appeals.Summary{
 		ID:            doc.ID.Hex(),
 		ReferenceCode: doc.ReferenceCode,
@@ -48,7 +54,7 @@ func summaryFromDoc(doc appealSummaryDoc) appeals.Summary {
 		Professor:     doc.Professor,
 		Status:        doc.Status,
 		LockedAt:      doc.LockedAt,
-		LockExpiresAt: doc.LockExpiresAt,
+		LockExpiresAt: lockExpiresAt,
 		CreatedAt:     doc.CreatedAt,
 	}
 }

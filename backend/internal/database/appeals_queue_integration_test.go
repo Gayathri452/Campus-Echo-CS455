@@ -187,7 +187,7 @@ func TestTriageClaimRecoveryAndStatusPersistence(t *testing.T) {
 		t.Fatalf("leased review listed for recovery: (%+v, %v)", pending, err)
 	}
 
-	if err := store.ReleaseTriage(ctx, created.ID); err != nil {
+	if err := store.ReleaseTriageAttempt(ctx, created.ID, claimed.TriageAttempts); err != nil {
 		t.Fatalf("release triage lease: %v", err)
 	}
 	if pending, err := store.ListSubmitted(ctx, 10); err != nil || len(pending) != 1 {
@@ -227,6 +227,167 @@ func TestTriageClaimRecoveryAndStatusPersistence(t *testing.T) {
 	}
 	if failed.Status != feedback.StatusTriageFailed || failed.ProcessingError != feedback.ProcessingFailureMessage {
 		t.Fatalf("terminal failure state = (%s, %q)", failed.Status, failed.ProcessingError)
+	}
+}
+
+func TestTriageDeferredRecoveryMetadata(t *testing.T) {
+	store, ctx := queueIntegrationMongo(t)
+	created, err := store.Create(ctx, feedback.CreateInput{
+		CourseID: "CS455", CourseTitle: "Software Engineering", Category: "teaching",
+		Rating: 4, Content: "A review deferred after a provider failure.",
+	})
+	if err != nil {
+		t.Fatalf("create feedback: %v", err)
+	}
+	firstClaim, ok, err := store.ClaimForTriage(ctx, created.ID, time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("claim review: (%v, %v)", ok, err)
+	}
+	if firstClaim.TriageAttempts != 1 || firstClaim.TriageCycleAttempts != 1 {
+		t.Fatalf("first attempt metadata = (%d, %d), want (1, 1)",
+			firstClaim.TriageAttempts, firstClaim.TriageCycleAttempts)
+	}
+
+	retryAt := time.Now().UTC().Truncate(time.Millisecond).Add(time.Minute)
+	if err := store.DeferTriage(ctx, created.ID, firstClaim.TriageAttempts, "provider_auth", retryAt); !errors.Is(err, feedback.ErrReviewNotEligible) {
+		t.Fatalf("defer actively leased review error = %v, want not eligible", err)
+	}
+	if err := store.ReleaseTriageAttempt(ctx, created.ID, firstClaim.TriageAttempts); err != nil {
+		t.Fatalf("release triage lease: %v", err)
+	}
+	if err := store.DeferTriage(ctx, created.ID, firstClaim.TriageAttempts, "provider_auth", retryAt); err != nil {
+		t.Fatalf("defer review: %v", err)
+	}
+	deferred, err := store.FindByID(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("find deferred review: %v", err)
+	}
+	if deferred.Status != feedback.StatusSubmitted || deferred.TriageFailureCategory != "provider_auth" ||
+		deferred.TriageRetryAt == nil || !deferred.TriageRetryAt.Equal(retryAt) ||
+		deferred.TriageCycleAttempts != 0 || deferred.TriageAttempts != 1 {
+		t.Fatalf("deferred state = %+v", deferred)
+	}
+	if pending, err := store.ListSubmitted(ctx, 10); err != nil || len(pending) != 0 {
+		t.Fatalf("future retry listed as eligible: (%+v, %v)", pending, err)
+	}
+	if _, ok, err := store.ClaimForTriage(ctx, created.ID, time.Minute); err != nil || ok {
+		t.Fatalf("claim during cooldown = (%v, %v), want not claimed", ok, err)
+	}
+
+	if err := store.DeferTriage(ctx, created.ID, firstClaim.TriageAttempts, "provider_auth", time.Now().UTC().Add(-time.Second)); err != nil {
+		t.Fatalf("make retry eligible: %v", err)
+	}
+	pending, err := store.ListSubmitted(ctx, 10)
+	if err != nil || len(pending) != 1 || pending[0].ID != created.ID {
+		t.Fatalf("eligible deferred review = (%+v, %v)", pending, err)
+	}
+	recovered, ok, err := store.ClaimForTriage(ctx, created.ID, time.Minute)
+	if err != nil || !ok || recovered.TriageAttempts != 2 || recovered.TriageCycleAttempts != 1 {
+		t.Fatalf("recovered claim = (%+v, %v, %v), want lifetime 2 and cycle 1", recovered, ok, err)
+	}
+	if err := store.UpdateStatus(ctx, created.ID, feedback.StatusPublished, ""); err != nil {
+		t.Fatalf("publish recovered review: %v", err)
+	}
+	published, err := store.FindByID(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("find published review: %v", err)
+	}
+	if published.Status != feedback.StatusPublished || published.TriageRetryAt != nil ||
+		published.TriageFailureCategory != "" || published.TriageAttempts != 2 {
+		t.Fatalf("published recovery metadata = %+v", published)
+	}
+	if err := store.DeferTriage(ctx, created.ID, recovered.TriageAttempts, "provider_auth", time.Now().Add(time.Minute)); !errors.Is(err, feedback.ErrReviewNotEligible) {
+		t.Fatalf("defer published review error = %v, want not eligible", err)
+	}
+}
+
+func TestTriageProviderCooldownBlocksNewAndExistingReviewsAndExpires(t *testing.T) {
+	store, ctx := queueIntegrationMongo(t)
+	existing, err := store.Create(ctx, feedback.CreateInput{
+		CourseID: "CS455", CourseTitle: "Course", Category: "teaching",
+		Rating: 4, Content: "An existing review during provider cooldown.",
+	})
+	if err != nil {
+		t.Fatalf("create existing feedback: %v", err)
+	}
+	retryAt := time.Now().UTC().Add(100 * time.Millisecond)
+	if err := store.SetProviderCooldown(ctx, "provider_auth", retryAt); err != nil {
+		t.Fatalf("persist provider cooldown: %v", err)
+	}
+	// A second store handle models a backend restart reading the durable singleton.
+	restarted := &Mongo{
+		feedbackCollection:    store.feedbackCollection,
+		triageStateCollection: store.triageStateCollection,
+	}
+	newlySubmitted, err := store.Create(ctx, feedback.CreateInput{
+		CourseID: "CS101", CourseTitle: "Course", Category: "teaching",
+		Rating: 4, Content: "A newly submitted review during provider cooldown.",
+	})
+	if err != nil {
+		t.Fatalf("create feedback during cooldown: %v", err)
+	}
+	pending, err := store.ListSubmitted(ctx, 10)
+	if err != nil {
+		t.Fatalf("list submitted during provider cooldown: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("submitted reviews listed during provider cooldown: %+v", pending)
+	}
+	for _, review := range []feedback.Feedback{existing, newlySubmitted} {
+		if _, claimed, err := restarted.ClaimForTriage(ctx, review.ID, time.Minute); err != nil || claimed {
+			t.Fatalf("claim %s during persisted cooldown = (%t, %v), want not claimed", review.ID, claimed, err)
+		}
+	}
+	time.Sleep(time.Until(retryAt) + 10*time.Millisecond)
+	pending, err = restarted.ListSubmitted(ctx, 10)
+	if err != nil || len(pending) != 2 {
+		t.Fatalf("submitted reviews after cooldown = (%+v, %v), want both reviews", pending, err)
+	}
+}
+
+func TestTriageExpiredWorkerCannotOverwriteNewerClaimResult(t *testing.T) {
+	store, ctx := queueIntegrationMongo(t)
+	review, err := store.Create(ctx, feedback.CreateInput{
+		CourseID: "CS455", CourseTitle: "Course", Category: "teaching",
+		Rating: 4, Content: "A review used to verify triage fencing.",
+	})
+	if err != nil {
+		t.Fatalf("create feedback: %v", err)
+	}
+	stale, ok, err := store.ClaimForTriage(ctx, review.ID, time.Millisecond)
+	if err != nil || !ok {
+		t.Fatalf("claim stale worker = (%t, %v)", ok, err)
+	}
+	time.Sleep(3 * time.Millisecond)
+	current, ok, err := store.ClaimForTriage(ctx, review.ID, time.Minute)
+	if err != nil || !ok || current.TriageAttempts <= stale.TriageAttempts {
+		t.Fatalf("claim current worker = (%+v, %t, %v)", current, ok, err)
+	}
+	if err := store.UpdateTriageStatus(ctx, review.ID, stale.TriageAttempts, feedback.StatusPublished, ""); !errors.Is(err, feedback.ErrReviewNotEligible) {
+		t.Fatalf("stale worker update error = %v, want not eligible", err)
+	}
+	stored, err := store.FindByID(ctx, review.ID)
+	if err != nil {
+		t.Fatalf("find review after stale update: %v", err)
+	}
+	if stored.Status != feedback.StatusSubmitted {
+		t.Fatalf("stale worker changed review status to %q, want %q", stored.Status, feedback.StatusSubmitted)
+	}
+	if err := store.ReleaseTriageAttempt(ctx, review.ID, stale.TriageAttempts); err != nil {
+		t.Fatalf("release stale worker lease: %v", err)
+	}
+	if _, ok, err := store.ClaimForTriage(ctx, review.ID, time.Minute); err != nil || ok {
+		t.Fatalf("claim after stale release = (%t, %v), want blocked by newer lease", ok, err)
+	}
+	if err := store.UpdateTriageStatus(ctx, review.ID, current.TriageAttempts, feedback.StatusFlagged, "newer worker decision"); err != nil {
+		t.Fatalf("persist current worker result: %v", err)
+	}
+	stored, err = store.FindByID(ctx, review.ID)
+	if err != nil {
+		t.Fatalf("find result after stale update: %v", err)
+	}
+	if stored.Status != feedback.StatusFlagged || stored.FlagReason != "newer worker decision" {
+		t.Fatalf("stale worker changed newer result: %+v", stored)
 	}
 }
 

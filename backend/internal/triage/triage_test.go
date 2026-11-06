@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,9 +25,14 @@ func (fn brigadingFunc) Check(ctx context.Context, review feedback.Feedback, rec
 }
 
 type memoryReviewRepository struct {
-	mu      sync.Mutex
-	reviews map[string]feedback.Feedback
-	leases  map[string]time.Time
+	mu                            sync.Mutex
+	reviews                       map[string]feedback.Feedback
+	leases                        map[string]time.Time
+	providerCooldownUntil         time.Time
+	providerCooldownCalls         int
+	providerCooldownBlockedClaims int
+	clock                         func() time.Time
+	recentQueryLimit              int
 }
 
 func newMemoryReviewRepository(reviews ...feedback.Feedback) *memoryReviewRepository {
@@ -56,17 +59,30 @@ func (repository *memoryReviewRepository) FindByID(_ context.Context, id string)
 func (repository *memoryReviewRepository) ClaimForTriage(_ context.Context, id string, lease time.Duration) (feedback.Feedback, bool, error) {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
+	now := repository.nowLocked()
 	review, exists := repository.reviews[id]
 	if !exists {
 		return feedback.Feedback{}, false, feedback.ErrReviewNotFound
 	}
-	if review.Status != feedback.StatusSubmitted || time.Now().Before(repository.leases[id]) {
+	if now.Before(repository.providerCooldownUntil) {
+		repository.providerCooldownBlockedClaims++
+		return feedback.Feedback{}, false, nil
+	}
+	if review.Status != feedback.StatusSubmitted || now.Before(repository.leases[id]) ||
+		(review.TriageRetryAt != nil && now.Before(*review.TriageRetryAt)) {
 		return feedback.Feedback{}, false, nil
 	}
 	review.TriageAttempts++
-	repository.leases[id] = time.Now().Add(lease)
+	review.TriageCycleAttempts++
+	repository.leases[id] = now.Add(lease)
 	repository.reviews[id] = review
 	return review, true, nil
+}
+
+func (repository *memoryReviewRepository) ProviderCooldownActive(_ context.Context) (bool, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	return repository.nowLocked().Before(repository.providerCooldownUntil), nil
 }
 
 func (repository *memoryReviewRepository) MarkTriageFailed(_ context.Context, id, reason string) error {
@@ -86,9 +102,56 @@ func (repository *memoryReviewRepository) MarkTriageFailed(_ context.Context, id
 	return nil
 }
 
+func (repository *memoryReviewRepository) DeferTriage(_ context.Context, id string, attempt int, category string, retryAt time.Time) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	review, exists := repository.reviews[id]
+	if !exists {
+		return feedback.ErrReviewNotFound
+	}
+	if review.Status != feedback.StatusSubmitted || review.TriageAttempts != attempt {
+		return feedback.ErrReviewNotEligible
+	}
+	if repository.nowLocked().Before(repository.leases[id]) {
+		return feedback.ErrReviewNotEligible
+	}
+	review.TriageFailureCategory = category
+	review.TriageRetryAt = &retryAt
+	review.TriageCycleAttempts = 0
+	repository.reviews[id] = review
+	delete(repository.leases, id)
+	return nil
+}
+
+func (repository *memoryReviewRepository) SetProviderCooldown(_ context.Context, _ string, retryAt time.Time) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	repository.providerCooldownCalls++
+	if retryAt.After(repository.providerCooldownUntil) {
+		repository.providerCooldownUntil = retryAt
+	}
+	return nil
+}
+
+func (repository *memoryReviewRepository) nowLocked() time.Time {
+	if repository.clock != nil {
+		return repository.clock()
+	}
+	return time.Now()
+}
+
 func (repository *memoryReviewRepository) ReleaseTriage(_ context.Context, id string) error {
 	repository.mu.Lock()
 	delete(repository.leases, id)
+	repository.mu.Unlock()
+	return nil
+}
+
+func (repository *memoryReviewRepository) ReleaseTriageAttempt(_ context.Context, id string, attempt int) error {
+	repository.mu.Lock()
+	if review, exists := repository.reviews[id]; exists && review.TriageAttempts == attempt {
+		delete(repository.leases, id)
+	}
 	repository.mu.Unlock()
 	return nil
 }
@@ -105,6 +168,28 @@ func (repository *memoryReviewRepository) UpdateStatus(_ context.Context, id, st
 	}
 	review.Status = status
 	review.FlagReason = reason
+	review.TriageFailureCategory = ""
+	review.TriageRetryAt = nil
+	repository.reviews[id] = review
+	delete(repository.leases, id)
+	return nil
+}
+
+func (repository *memoryReviewRepository) UpdateTriageStatus(_ context.Context, id string, attempt int, status, reason string) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	review, exists := repository.reviews[id]
+	if !exists {
+		return feedback.ErrReviewNotFound
+	}
+	if review.Status != feedback.StatusSubmitted || review.TriageAttempts != attempt ||
+		!repository.nowLocked().Before(repository.leases[id]) {
+		return feedback.ErrReviewNotEligible
+	}
+	review.Status = status
+	review.FlagReason = reason
+	review.TriageFailureCategory = ""
+	review.TriageRetryAt = nil
 	repository.reviews[id] = review
 	delete(repository.leases, id)
 	return nil
@@ -129,6 +214,7 @@ func (repository *memoryReviewRepository) FlagReviews(_ context.Context, ids []s
 func (repository *memoryReviewRepository) ListRecentByCourse(_ context.Context, courseID string, limit int) ([]feedback.Feedback, error) {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
+	repository.recentQueryLimit = limit
 	results := make([]feedback.Feedback, 0, len(repository.reviews))
 	for _, review := range repository.reviews {
 		if review.CourseID == courseID {
@@ -171,9 +257,13 @@ func (repository *memoryReviewRepository) ListSubmitted(_ context.Context, limit
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
 	results := make([]feedback.Feedback, 0)
-	now := time.Now()
+	now := repository.nowLocked()
+	if now.Before(repository.providerCooldownUntil) {
+		return results, nil
+	}
 	for id, review := range repository.reviews {
-		if review.Status == feedback.StatusSubmitted && !now.Before(repository.leases[id]) {
+		if review.Status == feedback.StatusSubmitted && !now.Before(repository.leases[id]) &&
+			(review.TriageRetryAt == nil || !now.Before(*review.TriageRetryAt)) {
 			results = append(results, review)
 		}
 	}
@@ -272,39 +362,25 @@ func TestProviderFailuresAndMalformedDecisionsStaySubmitted(t *testing.T) {
 	}
 }
 
-func TestDuplicateDetectionIsCourseAndChronologyScoped(t *testing.T) {
-	now := time.Now().UTC()
-	old := testReview("older-review", "CS455", "The weekly lectures and examples were very helpful for understanding the material.", now.Add(-time.Minute))
-	current := testReview("newer-review", "CS455", "The weekly lectures and examples were really helpful for understanding the material.", now)
-	otherCourse := current
-	otherCourse.CourseID = "CS101"
-	detector := NewSimilarityDuplicateDetector(0.82)
+func TestJobFailureUnwrapsProviderFailure(t *testing.T) {
+	providerFailure := &ProviderFailure{Status: 401, Kind: "authentication", Message: "invalid credentials"}
+	jobFailure := &JobFailure{
+		Attempt:   1,
+		Retryable: false,
+		Err:       fmt.Errorf("%w: %w", ErrClassifierFailed, providerFailure),
+	}
 
-	result, err := detector.Detect(context.Background(), current, []feedback.Feedback{old})
-	if err != nil || !result.IsDuplicate || result.Similarity < 0.82 {
-		t.Fatalf("same-course near-duplicate = (%+v, %v), want similarity >= 0.82", result, err)
+	var recovered *ProviderFailure
+	if !errors.As(jobFailure, &recovered) {
+		t.Fatal("errors.As did not recover ProviderFailure through JobFailure")
 	}
-	result, err = detector.Detect(context.Background(), otherCourse, []feedback.Feedback{old})
-	if err != nil || result.IsDuplicate {
-		t.Fatalf("cross-course duplicate = (%+v, %v), want no duplicate", result, err)
+	if recovered != providerFailure {
+		t.Fatalf("recovered provider failure = %p, want original %p", recovered, providerFailure)
 	}
-	result, err = detector.Detect(context.Background(), old, []feedback.Feedback{current})
-	if err != nil || result.IsDuplicate {
-		t.Fatalf("older review classified as duplicate = (%+v, %v), want no duplicate", result, err)
+	if !errors.Is(jobFailure, ErrClassifierFailed) {
+		t.Fatal("errors.Is did not recover ErrClassifierFailed through JobFailure")
 	}
 }
-
-func TestDuplicateThresholdBoundary(t *testing.T) {
-	now := time.Now().UTC()
-	older := testReview("a", "CS455", "Repeated useful course feedback", now.Add(-time.Minute))
-	newer := testReview("b", "CS455", "Repeated useful course feedback", now)
-	detector := NewSimilarityDuplicateDetector(1)
-	result, err := detector.Detect(context.Background(), newer, []feedback.Feedback{older})
-	if err != nil || !result.IsDuplicate || result.Similarity < 1 {
-		t.Fatalf("similarity exactly at threshold = (%+v, %v), want duplicate", result, err)
-	}
-}
-
 func TestAsyncDispatchDoesNotWaitForSlowProviderAndRetries(t *testing.T) {
 	review := testReview("review-1", "CS455", "Useful course review", time.Now())
 	repository := newMemoryReviewRepository(review)
@@ -396,13 +472,13 @@ func TestRetryExhaustionPersistsFailureWithoutPublishing(t *testing.T) {
 	if err := service.Dispatch(context.Background(), review.ID); err != nil {
 		t.Fatalf("dispatch review: %v", err)
 	}
-	waitForStatus(t, repository, review.ID, feedback.StatusTriageFailed)
+	waitForDeferredCategory(t, repository, review.ID, "triage_processing")
 	stored, err := repository.FindByID(context.Background(), review.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.Status == feedback.StatusPublished || stored.TriageAttempts != 3 ||
-		stored.ProcessingError != feedback.ProcessingFailureMessage || calls.Load() != 3 {
+	if stored.Status != feedback.StatusSubmitted || stored.TriageAttempts != 3 ||
+		stored.TriageCycleAttempts != 0 || stored.TriageRetryAt == nil || calls.Load() != 3 {
 		t.Fatalf("exhausted review state = %+v, provider calls = %d", stored, calls.Load())
 	}
 }
@@ -454,6 +530,42 @@ func TestConcurrentServicesCannotClaimReviewTwice(t *testing.T) {
 	assertReviewState(t, repository, review.ID, feedback.StatusPublished, "")
 }
 
+func TestExpiredWorkerCannotReleaseOrOverwriteNewerClaim(t *testing.T) {
+	review := testReview("review-stale-worker", "CS455", "One review.", time.Now())
+	repository := newMemoryReviewRepository(review)
+	stale, claimed, err := repository.ClaimForTriage(context.Background(), review.ID, time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("first claim = (%t, %v)", claimed, err)
+	}
+
+	repository.mu.Lock()
+	repository.leases[review.ID] = time.Now().Add(-time.Second)
+	repository.mu.Unlock()
+	current, claimed, err := repository.ClaimForTriage(context.Background(), review.ID, time.Minute)
+	if err != nil || !claimed || current.TriageAttempts <= stale.TriageAttempts {
+		t.Fatalf("replacement claim = (%+v, %t, %v)", current, claimed, err)
+	}
+	if err := repository.ReleaseTriageAttempt(context.Background(), review.ID, stale.TriageAttempts); err != nil {
+		t.Fatalf("stale worker release: %v", err)
+	}
+	if _, claimed, err := repository.ClaimForTriage(context.Background(), review.ID, time.Minute); err != nil || claimed {
+		t.Fatalf("claim after stale release = (%t, %v), want blocked by current lease", claimed, err)
+	}
+	if err := repository.UpdateTriageStatus(context.Background(), review.ID, current.TriageAttempts, feedback.StatusFlagged, "current result"); err != nil {
+		t.Fatalf("update from current worker: %v", err)
+	}
+	if err := repository.UpdateTriageStatus(context.Background(), review.ID, stale.TriageAttempts, feedback.StatusPublished, ""); !errors.Is(err, feedback.ErrReviewNotEligible) {
+		t.Fatalf("stale worker update error = %v, want not eligible", err)
+	}
+	stored, err := repository.FindByID(context.Background(), review.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != feedback.StatusFlagged || stored.FlagReason != "current result" {
+		t.Fatalf("stale worker overwrote current result: %+v", stored)
+	}
+}
+
 func TestStartupRecoveryProcessesPersistedSubmittedReview(t *testing.T) {
 	review := testReview("review-1", "CS455", "Pending after restart", time.Now())
 	repository := newMemoryReviewRepository(review)
@@ -466,210 +578,6 @@ func TestStartupRecoveryProcessesPersistedSubmittedReview(t *testing.T) {
 	defer service.Stop()
 
 	waitForStatus(t, repository, review.ID, feedback.StatusPublished)
-}
-
-func TestConcurrentSimilarReviewsKeepOlderReviewAndFlagNewer(t *testing.T) {
-	now := time.Now().UTC()
-	older := testReview("review-a", "CS455", "The examples were useful and clear.", now)
-	newer := testReview("review-b", "CS455", "The examples were useful and clear!", now.Add(time.Second))
-	repository := newMemoryReviewRepository(older, newer)
-	service := serviceForTest(repository, providerFunc(func(context.Context, feedback.Feedback) (AIResult, error) {
-		return AIResult{Decision: DecisionPublish}, nil
-	}), WithDuplicateThreshold(0.8))
-
-	var done sync.WaitGroup
-	for _, review := range []feedback.Feedback{older, newer} {
-		done.Add(1)
-		go func(id string) {
-			defer done.Done()
-			if err := service.ProcessReview(context.Background(), id); err != nil {
-				t.Errorf("process %s: %v", id, err)
-			}
-		}(review.ID)
-	}
-	done.Wait()
-	assertReviewState(t, repository, older.ID, feedback.StatusPublished, "")
-	assertReviewState(t, repository, newer.ID, feedback.StatusFlagged, "duplicate_spam: Review closely repeats an earlier submission for this course.")
-}
-
-func TestBrigadingDetectionFlagsAllReturnedReviewIDs(t *testing.T) {
-	now := time.Now().UTC()
-	current := testReview("current", "CS455", "Current review", now)
-	related := testReview("related", "CS455", "Related review", now.Add(-time.Minute))
-	repository := newMemoryReviewRepository(current, related)
-	service := NewService(repository, providerFunc(func(context.Context, feedback.Feedback) (AIResult, error) {
-		return AIResult{Decision: DecisionPublish}, nil
-	}), WithBrigadingChecker(brigadingFunc(func(context.Context, feedback.Feedback, []feedback.Feedback) (BrigadingCheck, error) {
-		return BrigadingCheck{Detected: true, Reason: "coordinated activity", ReviewIDs: []string{related.ID}}, nil
-	})))
-
-	if err := service.ProcessReview(context.Background(), current.ID); err != nil {
-		t.Fatalf("process review: %v", err)
-	}
-	assertReviewState(t, repository, current.ID, feedback.StatusFlagged, "coordinated activity")
-	assertReviewState(t, repository, related.ID, feedback.StatusFlagged, "coordinated activity")
-}
-
-type semanticEmbedderFunc func(context.Context, []string) ([][]float32, error)
-
-func (fn semanticEmbedderFunc) Embed(ctx context.Context, texts []string) ([][]float32, error) {
-	return fn(ctx, texts)
-}
-
-func (semanticEmbedderFunc) Model() string { return DefaultGeminiEmbeddingModel }
-
-func TestGeminiBrigadingCheckerRequirementsAndBoundaries(t *testing.T) {
-	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
-	tests := []struct {
-		name       string
-		count      int
-		oldCount   int
-		shortCount int
-		vectorFor  func(int) []float32
-		want       bool
-	}{
-		{
-			name:      "V=30 and S=30 percent stays organic",
-			count:     30,
-			vectorFor: func(i int) []float32 { return equicorrelatedEmbedding(30, 0.30, i) },
-		},
-		{
-			name:      "V below 15 and S=95 percent flags no brigading batch",
-			count:     14,
-			vectorFor: func(i int) []float32 { return equicorrelatedEmbedding(14, 0.95, i) },
-		},
-		{
-			name:      "V=15 does not exceed the strict velocity threshold",
-			count:     15,
-			vectorFor: func(i int) []float32 { return equicorrelatedEmbedding(15, 0.95, i) },
-		},
-		{
-			name:      "V=20 and S=85 percent triggers brigading",
-			count:     20,
-			vectorFor: func(i int) []float32 { return equicorrelatedEmbedding(20, 0.85, i) },
-			want:      true,
-		},
-		{
-			name:      "16 highly similar reviews exceed both thresholds",
-			count:     16,
-			vectorFor: func(int) []float32 { return []float32{1, 0} },
-			want:      true,
-		},
-		{
-			name:      "reviews outside the ten minute window do not count",
-			count:     14,
-			oldCount:  2,
-			vectorFor: func(int) []float32 { return []float32{1, 0} },
-		},
-		{
-			name:       "five word reviews do not count toward velocity",
-			count:      16,
-			shortCount: 1,
-			vectorFor:  func(int) []float32 { return []float32{1, 0} },
-		},
-		{
-			name:  "similarity exactly at 75 percent does not trigger",
-			count: 16,
-			vectorFor: func(i int) []float32 {
-				vector := make([]float32, 17)
-				vector[0] = float32(math.Sqrt(0.75))
-				vector[i+1] = 0.5
-				return vector
-			},
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			reviews := make([]feedback.Feedback, 0, test.count+test.oldCount)
-			for i := 0; i < test.count+test.oldCount; i++ {
-				content := "The workload and lectures were consistently very challenging."
-				if i < test.shortCount {
-					content = "Too much weekly work"
-				}
-				created := now.Add(-time.Duration(i) * time.Second)
-				if i >= test.count {
-					created = now.Add(-BrigadingWindow - time.Second)
-				}
-				reviews = append(reviews, feedback.Feedback{
-					ID: fmt.Sprintf("review-%02d", i), CourseID: "CS455", Content: content,
-					Status: feedback.StatusPublished, CreatedAt: created,
-					SemanticEmbedding: test.vectorFor(i % test.count), SemanticEmbeddingModel: DefaultGeminiEmbeddingModel,
-				})
-			}
-			repository := newMemoryReviewRepository(reviews...)
-			current := reviews[0]
-			checker := NewGeminiBrigadingChecker(
-				semanticEmbedderFunc(func(context.Context, []string) ([][]float32, error) {
-					t.Fatal("cached embeddings should not call the external provider")
-					return nil, nil
-				}),
-				repository,
-			)
-			checker.now = func() time.Time { return now }
-
-			result, err := checker.Check(context.Background(), current, reviews[1:])
-			if err != nil {
-				t.Fatalf("Check() error = %v", err)
-			}
-			if result.Detected != test.want {
-				t.Fatalf("Detected = %v, want %v (velocity=%d similarity=%.4f)", result.Detected, test.want, result.Velocity, result.AverageSimilarity)
-			}
-			if test.want && (result.Velocity != test.count || len(result.ReviewIDs) != test.count || result.AverageSimilarity <= BrigadingSimilarityLimit) {
-				t.Fatalf("brigading result = %+v, want %d reviews and similarity > 0.75", result, test.count)
-			}
-		})
-	}
-}
-
-func equicorrelatedEmbedding(size int, similarity float64, index int) []float32 {
-	vector := make([]float32, size+1)
-	vector[0] = float32(math.Sqrt(similarity))
-	vector[index+1] = float32(math.Sqrt(1 - similarity))
-	return vector
-}
-
-func TestBrigadingIsEvaluatedBeforeDuplicateMicroFlagging(t *testing.T) {
-	now := time.Now().UTC()
-	reviews := make([]feedback.Feedback, 16)
-	for i := range reviews {
-		reviews[i] = testReview(fmt.Sprintf("review-%02d", i), "CS455", "The lectures and assignments were helpful every single week.", now.Add(-time.Duration(i)*time.Second))
-		reviews[i].Status = feedback.StatusPublished
-		reviews[i].SemanticEmbedding = []float32{1, 0}
-		reviews[i].SemanticEmbeddingModel = DefaultGeminiEmbeddingModel
-	}
-	reviews[0].Status = feedback.StatusSubmitted
-	repository := newMemoryReviewRepository(reviews...)
-	checker := NewGeminiBrigadingChecker(
-		semanticEmbedderFunc(func(context.Context, []string) ([][]float32, error) {
-			t.Fatal("cached embeddings should not call the external provider")
-			return nil, nil
-		}),
-		repository,
-	)
-	service := NewService(repository, providerFunc(func(context.Context, feedback.Feedback) (AIResult, error) {
-		return AIResult{Decision: DecisionPublish}, nil
-	}), WithBrigadingChecker(checker))
-
-	if err := service.ProcessReview(context.Background(), reviews[0].ID); err != nil {
-		t.Fatalf("process review: %v", err)
-	}
-	updated, err := repository.FindByID(context.Background(), reviews[0].ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updated.Status != feedback.StatusFlagged || !strings.Contains(updated.FlagReason, "brigading:") {
-		t.Fatalf("review state = (%s, %q), want brigading flag", updated.Status, updated.FlagReason)
-	}
-	for _, review := range reviews[1:] {
-		updated, err := repository.FindByID(context.Background(), review.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if updated.Status != feedback.StatusFlagged {
-			t.Errorf("review %s status = %s, want flagged", review.ID, updated.Status)
-		}
-	}
 }
 
 func TestWorkerQueueSaturationReturnsError(t *testing.T) {

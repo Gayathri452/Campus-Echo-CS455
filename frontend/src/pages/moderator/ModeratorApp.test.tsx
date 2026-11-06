@@ -91,6 +91,7 @@ describe("ModeratorApp", () => {
   });
 
   it("opens a ticket from Active appeals", async () => {
+    mockedFetchQueue.mockResolvedValue([]);
     mockedFetchMyTickets.mockResolvedValue([summary()]);
     mockedFetchTicket.mockResolvedValue(detail());
     render(<ModeratorApp session={session} onLogout={vi.fn()} />);

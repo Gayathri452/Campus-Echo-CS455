@@ -23,7 +23,10 @@ The React student feedback page submits to the Go API through Vite's `/api`
 development proxy. The API validates the request and inserts an anonymous
 feedback document into MongoDB as `submitted`, then dispatches background AI
 triage. The worker can publish or flag a review, detect same-course lexical
-duplicates, and optionally check a course's recent review cohort for brigading.
+duplicates using Unicode-aware text normalization (for reviews of at least six
+words, comparing against at most the latest 200 reviews), and optionally check
+a course's recent review cohort for brigading. Retry backoff is scheduled
+outside the worker goroutines so waiting retries do not occupy processing slots.
 Flagged submissions stay out of the moderator queue until a student submits
 their single appeal. That appeal creates an `under_appeal` ticket; moderator
 resolution updates both the ticket and review.

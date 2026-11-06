@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import type { AuthSession } from "../services/auth";
 import AnnouncementsPanel from "./student/AnnouncementsPanel";
-import { CourseIdInput, CourseTitleAutofill } from "./student/CourseSuggestions";
+import { CourseIdInput, findListedCourse, useCourseCatalog } from "./student/CourseSuggestions";
 import ReferenceNotebookPage from "./student/ReferenceNotebookPage";
 import SaveToNotebook from "./student/SaveToNotebook";
 import {
@@ -161,6 +161,9 @@ function SubmitReview({ accessToken, onComplete }: { accessToken?: string; onCom
   const [result, setResult] = useState<FeedbackResponse | null>(null);
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // Reviews are accepted only for listed courses; the title comes from the list.
+  const catalog = useCourseCatalog(accessToken);
+  const listedCourse = findListedCourse(catalog, form.courseId);
 
   const setField = (field: keyof typeof form, value: string | number) => {
     setForm((current) => ({ ...current, [field]: value }));
@@ -169,6 +172,11 @@ function SubmitReview({ accessToken, onComplete }: { accessToken?: string; onCom
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
+    // If the list could not load, the server still checks the course.
+    if (catalog.length > 0 && !listedCourse) {
+      setError("Choose a course from the list: start typing its code or name and pick it from the dropdown.");
+      return;
+    }
     if (!form.rating) {
       setError("Choose a rating before submitting.");
       return;
@@ -176,7 +184,8 @@ function SubmitReview({ accessToken, onComplete }: { accessToken?: string; onCom
 
     setIsSubmitting(true);
     try {
-      setResult(await submitFeedback(form, accessToken));
+      const course = listedCourse ? { courseId: listedCourse.courseId, courseTitle: listedCourse.title } : {};
+      setResult(await submitFeedback({ ...form, ...course }, accessToken));
       setForm({ courseId: "", courseTitle: "", professor: "", year: new Date().getFullYear(), category: "teaching", rating: 0, content: "" });
     } catch (submitError: unknown) {
       setError(submitError instanceof Error ? submitError.message : "We could not submit the review.");
@@ -235,12 +244,15 @@ function SubmitReview({ accessToken, onComplete }: { accessToken?: string; onCom
         <div className="grid gap-5 sm:grid-cols-2">
           <Field label="Course ID">
             <CourseIdInput accessToken={accessToken} onChange={(value) => setField("courseId", value)} onPick={(course) => {
-              setField("courseTitle", course.title);
               if (course.instructor) setField("professor", course.instructor);
-            }} placeholder="CS455" value={form.courseId} />
+            }} placeholder="CS455" requireListed value={form.courseId} />
           </Field>
           <Field label="Course title">
-            <input className="input" placeholder="Software Engineering" value={form.courseTitle} onChange={(event) => setField("courseTitle", event.target.value)} />
+            {catalog.length > 0 ? (
+              <input className="input bg-mist/60" placeholder="Filled in from the course list" readOnly value={listedCourse?.title ?? ""} />
+            ) : (
+              <input className="input" placeholder="Software Engineering" value={form.courseTitle} onChange={(event) => setField("courseTitle", event.target.value)} />
+            )}
           </Field>
         </div>
         <div className="grid gap-5 sm:grid-cols-2">
@@ -251,7 +263,6 @@ function SubmitReview({ accessToken, onComplete }: { accessToken?: string; onCom
             <input className="input" max={2100} min={1900} placeholder="2026" required type="number" value={form.year || ""} onChange={(event) => setField("year", event.target.valueAsNumber || 0)} />
           </Field>
         </div>
-        <CourseTitleAutofill accessToken={accessToken} courseId={form.courseId} courseTitle={form.courseTitle} onFill={(title) => setField("courseTitle", title)} />
         <Field label="Category">
           <select className="input" value={form.category} onChange={(event) => setField("category", event.target.value)}>
             {reviewCategories.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}

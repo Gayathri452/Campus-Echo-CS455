@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Kishore200524/CS455-Project/backend/internal/auth"
 )
@@ -34,6 +36,10 @@ type otpVerification struct {
 const sessionCookieName = "campusecho_session"
 
 func (s *Server) requestOTP(w http.ResponseWriter, r *http.Request) {
+	if !s.authRateLimiter.allow(clientIP(r), 5, 10*time.Minute, time.Now().UTC()) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many authentication requests; try again later"})
+		return
+	}
 	var input otpRequest
 	if err := decodeRequestJSON(w, r, &input); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request must contain one valid JSON object"})
@@ -74,6 +80,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) loginAsRole(w http.ResponseWriter, r *http.Request, role string) {
+	if !s.authRateLimiter.allow(clientIP(r), 20, 10*time.Minute, time.Now().UTC()) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many authentication requests; try again later"})
+		return
+	}
 	var input credentials
 	if err := decodeRequestJSON(w, r, &input); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request must contain one valid JSON object"})
@@ -92,6 +102,14 @@ func (s *Server) loginAsRole(w http.ResponseWriter, r *http.Request, role string
 		return
 	}
 	writeJSON(w, http.StatusOK, session)
+}
+
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 func (s *Server) loginStudent(w http.ResponseWriter, r *http.Request) {
@@ -202,6 +220,8 @@ func (s *Server) writeAuthError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired OTP"})
 	case errors.Is(err, auth.ErrOTPAttempts), errors.Is(err, auth.ErrOTPResends), errors.Is(err, auth.ErrOTPResendTooSoon):
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "OTP request limit reached; try again later"})
+	case errors.Is(err, auth.ErrLoginRateLimited), errors.Is(err, auth.ErrOTPRequestRateLimited):
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many authentication requests; try again later"})
 	case errors.Is(err, auth.ErrEmailService):
 		log.Printf("email delivery: %v", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "email delivery is not configured"})

@@ -1,8 +1,8 @@
 // Package courses holds the administrator-managed course catalog: the list of
 // courses students pick from when they search for or review a course.
 //
-// The catalog only offers suggestions. Review submission does not require a
-// catalog course, so existing behaviour is unchanged.
+// Review submission accepts only catalog courses (see Finder), so one course
+// cannot be split into several spellings such as "CS455" and "CS 455".
 package courses
 
 import (
@@ -53,6 +53,12 @@ type Store interface {
 	ListCourses(ctx context.Context, search string, limit int) ([]Course, error)
 	CreateCourse(ctx context.Context, course Course) (Course, error)
 	DeleteCourse(ctx context.Context, courseID string) error
+}
+
+// Finder looks up one catalog course by its normalized course ID and returns
+// ErrCourseNotFound when it is not listed. *database.Mongo implements it.
+type Finder interface {
+	FindCourse(ctx context.Context, courseID string) (Course, error)
 }
 
 // NormalizeCourseID trims, collapses inner spaces and upper-cases an ID.

@@ -11,6 +11,7 @@ import (
 	"net"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Kishore200524/CS455-Project/backend/internal/feedback"
@@ -180,8 +181,15 @@ func (p *GeminiProvider) Classify(ctx context.Context, review feedback.Feedback)
 		if errors.As(err, &networkError) {
 			return AIResult{}, &ProviderFailure{
 				Kind:      "network error",
-				Retryable: networkError.Timeout() || networkError.Temporary(),
+				Retryable: networkError.Timeout() || networkError.Temporary() || isTransientGeminiNetworkError(err),
 				Message:   redactGeminiError(networkError.Error(), p.apiKey, review.Content),
+			}
+		}
+		if isTransientGeminiNetworkError(err) {
+			return AIResult{}, &ProviderFailure{
+				Kind:      "network error",
+				Retryable: true,
+				Message:   redactGeminiError(err.Error(), p.apiKey, review.Content),
 			}
 		}
 		return AIResult{}, &ProviderFailure{
@@ -222,7 +230,24 @@ func (p *GeminiProvider) Classify(ctx context.Context, review feedback.Feedback)
 }
 
 func invalidGeminiResponse(message string) error {
-	return &ProviderFailure{Kind: "invalid response", Message: message}
+	return &ProviderFailure{Kind: "invalid response", Retryable: true, Message: message}
+}
+
+func isTransientGeminiNetworkError(err error) bool {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	for _, networkErr := range []error{
+		syscall.ECONNRESET,
+		syscall.ECONNABORTED,
+		syscall.EPIPE,
+		syscall.ENETRESET,
+	} {
+		if errors.Is(err, networkErr) {
+			return true
+		}
+	}
+	return false
 }
 
 func retryableGeminiStatus(status int) bool {

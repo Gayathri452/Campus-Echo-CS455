@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/Kishore200524/CS455-Project/backend/internal/feedback"
 )
@@ -20,6 +21,8 @@ const (
 	DefaultQueueSize          = 64
 	DefaultRetryBackoff       = 2 * time.Second
 	DefaultDuplicateThreshold = 0.82
+	MinDuplicateReviewWords   = 6
+	DuplicateHistoryLimit     = 200
 	BrigadingWindow           = 10 * time.Minute
 	BrigadingReviewThreshold  = 15
 	BrigadingSimilarityLimit  = 0.75
@@ -27,6 +30,8 @@ const (
 	DefaultProcessTimeout     = 25 * time.Second
 	DefaultRecoveryInterval   = 15 * time.Second
 	DefaultLeaseDuration      = time.Minute
+	DefaultRecoveryCooldown   = 5 * time.Minute
+	DefaultProviderCooldown   = 15 * time.Minute
 )
 
 const (
@@ -87,8 +92,9 @@ type BrigadingChecker interface {
 type ReviewRepository interface {
 	FindByID(ctx context.Context, id string) (feedback.Feedback, error)
 	ClaimForTriage(ctx context.Context, id string, lease time.Duration) (feedback.Feedback, bool, error)
-	ReleaseTriage(ctx context.Context, id string) error
-	UpdateStatus(ctx context.Context, id, status, reason string) error
+	ProviderCooldownActive(ctx context.Context) (bool, error)
+	ReleaseTriageAttempt(ctx context.Context, id string, attempt int) error
+	UpdateTriageStatus(ctx context.Context, id string, attempt int, status, reason string) error
 	FlagReviews(ctx context.Context, ids []string, reason string) error
 	ListRecentByCourse(ctx context.Context, courseID string, limit int) ([]feedback.Feedback, error)
 	ListCourseReviewsInWindow(ctx context.Context, courseID string, since, until time.Time) ([]feedback.Feedback, error)
@@ -96,8 +102,9 @@ type ReviewRepository interface {
 	ListSubmitted(ctx context.Context, limit int) ([]feedback.Feedback, error)
 }
 
-type triageFailureRepository interface {
-	MarkTriageFailed(ctx context.Context, id, reason string) error
+type triageRecoveryRepository interface {
+	DeferTriage(ctx context.Context, id string, attempt int, category string, retryAt time.Time) error
+	SetProviderCooldown(ctx context.Context, category string, retryAt time.Time) error
 }
 
 type Dispatcher interface {
@@ -105,14 +112,16 @@ type Dispatcher interface {
 }
 
 type Job struct {
-	ReviewID string
-	Attempt  int
+	ReviewID      string
+	Attempt       int
+	TriageAttempt int
 }
 
 type JobFailure struct {
-	Attempt   int
-	Retryable bool
-	Err       error
+	Attempt       int
+	TriageAttempt int
+	Retryable     bool
+	Err           error
 }
 
 func (e *JobFailure) Error() string { return e.Err.Error() }
@@ -128,6 +137,7 @@ type WorkerPool struct {
 	enqueueRetry func(context.Context, Job) error
 	onFailure    func(context.Context, Job, error)
 	wg           sync.WaitGroup
+	retryWG      sync.WaitGroup
 	stopOnce     sync.Once
 	mu           sync.RWMutex
 	stopped      bool
@@ -198,10 +208,12 @@ func (p *WorkerPool) worker(ctx context.Context) {
 		case job := <-p.jobs:
 			if err := p.fn(ctx, job); err != nil {
 				attempt := job.Attempt + 1
+				leaseAttempt := job.TriageAttempt
 				retryable := true
 				var failure *JobFailure
 				if errors.As(err, &failure) {
 					attempt = failure.Attempt
+					leaseAttempt = failure.TriageAttempt
 					retryable = failure.Retryable
 				}
 				log.Printf("triage processing failed: review_id=%s attempt=%d retryable=%t error=%v", job.ReviewID, attempt, retryable, err)
@@ -213,27 +225,37 @@ func (p *WorkerPool) worker(ctx context.Context) {
 					if p.prepareRetry != nil {
 						p.prepareRetry(retry)
 					}
-					if err := waitBackoff(ctx, p.backoff, retry.Attempt); err != nil {
-						return
-					}
-					enqueue := p.enqueueRetry
-					if enqueue == nil {
-						enqueue = p.Enqueue
-					}
-					if err := enqueue(ctx, retry); err != nil && !errors.Is(err, ErrQueueFull) {
-						if p.onFailure != nil {
-							p.onFailure(ctx, retry, err)
-						}
-						log.Printf("triage retry could not be queued: review_id=%s error=%v", job.ReviewID, err)
-					} else if errors.Is(err, ErrQueueFull) {
-						log.Printf("triage retry deferred to pending-review recovery: review_id=%s", job.ReviewID)
-					}
+					p.scheduleRetry(ctx, retry)
 				} else if p.onFailure != nil {
-					p.onFailure(ctx, Job{ReviewID: job.ReviewID, Attempt: attempt}, err)
+					p.onFailure(ctx, Job{
+						ReviewID: job.ReviewID, Attempt: attempt, TriageAttempt: leaseAttempt,
+					}, err)
 				}
 			}
 		}
 	}
+}
+
+func (p *WorkerPool) scheduleRetry(ctx context.Context, retry Job) {
+	p.retryWG.Add(1)
+	go func() {
+		defer p.retryWG.Done()
+		if err := waitBackoff(ctx, p.backoff, retry.Attempt); err != nil {
+			return
+		}
+		enqueue := p.enqueueRetry
+		if enqueue == nil {
+			enqueue = p.Enqueue
+		}
+		if err := enqueue(ctx, retry); err != nil && !errors.Is(err, ErrQueueFull) {
+			if p.onFailure != nil {
+				p.onFailure(ctx, retry, err)
+			}
+			log.Printf("triage retry could not be queued: review_id=%s error=%v", retry.ReviewID, err)
+		} else if errors.Is(err, ErrQueueFull) {
+			log.Printf("triage retry deferred to pending-review recovery: review_id=%s", retry.ReviewID)
+		}
+	}()
 }
 
 func waitBackoff(ctx context.Context, base time.Duration, attempt int) error {
@@ -269,6 +291,7 @@ func (p *WorkerPool) Stop() {
 		p.cancel()
 		p.mu.Unlock()
 		p.wg.Wait()
+		p.retryWG.Wait()
 	})
 }
 
@@ -285,6 +308,8 @@ type Service struct {
 	processTimeout     time.Duration
 	recoveryInterval   time.Duration
 	leaseDuration      time.Duration
+	recoveryCooldown   time.Duration
+	providerCooldown   time.Duration
 	duplicateThreshold float64
 	mu                 sync.Mutex
 	started            bool
@@ -354,6 +379,22 @@ func WithLeaseDuration(duration time.Duration) Option {
 	}
 }
 
+func WithRecoveryCooldown(duration time.Duration) Option {
+	return func(service *Service) {
+		if duration > 0 {
+			service.recoveryCooldown = duration
+		}
+	}
+}
+
+func WithProviderCooldown(duration time.Duration) Option {
+	return func(service *Service) {
+		if duration > 0 {
+			service.providerCooldown = duration
+		}
+	}
+}
+
 func WithDuplicateThreshold(threshold float64) Option {
 	return func(service *Service) {
 		if threshold > 0 && threshold <= 1 {
@@ -383,6 +424,8 @@ func NewService(repo ReviewRepository, provider Provider, opts ...Option) *Servi
 		processTimeout:     DefaultProcessTimeout,
 		recoveryInterval:   DefaultRecoveryInterval,
 		leaseDuration:      DefaultLeaseDuration,
+		recoveryCooldown:   DefaultRecoveryCooldown,
+		providerCooldown:   DefaultProviderCooldown,
 		queued:             make(map[string]struct{}),
 		inFlight:           make(map[string]struct{}),
 		stopDone:           make(chan struct{}),
@@ -494,11 +537,13 @@ func (s *Service) scanPending(ctx context.Context) {
 		return
 	}
 	for _, review := range reviews {
-		if review.TriageAttempts >= s.maxRetries+1 {
-			s.failReview(ctx, Job{ReviewID: review.ID, Attempt: review.TriageAttempts}, errors.New("maximum triage attempts already reached"))
+		if review.TriageCycleAttempts >= s.maxRetries+1 {
+			s.failReview(ctx, Job{
+				ReviewID: review.ID, Attempt: review.TriageCycleAttempts, TriageAttempt: review.TriageAttempts,
+			}, errors.New("triage cycle attempt budget exhausted"))
 			continue
 		}
-		if err := s.dispatchJob(ctx, Job{ReviewID: review.ID, Attempt: review.TriageAttempts}); err != nil {
+		if err := s.dispatchJob(ctx, Job{ReviewID: review.ID, Attempt: review.TriageCycleAttempts}); err != nil {
 			if ctx.Err() == nil && !errors.Is(err, ErrQueueFull) {
 				log.Printf("triage pending review could not be queued: review_id=%s error=%v", review.ID, err)
 			}
@@ -534,17 +579,26 @@ func (s *Service) processJob(parent context.Context, job Job) error {
 	if !claimed {
 		return nil
 	}
+	leaseAttempt := review.TriageAttempts
 	attempt := job.Attempt + 1
-	if review.TriageAttempts > attempt {
-		attempt = review.TriageAttempts
+	if review.TriageCycleAttempts > attempt {
+		attempt = review.TriageCycleAttempts
 	}
 	defer func() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		if err := s.store.ReleaseTriage(releaseCtx, job.ReviewID); err != nil {
+		if err := s.store.ReleaseTriageAttempt(releaseCtx, job.ReviewID, leaseAttempt); err != nil {
 			log.Printf("triage lease release failed: review_id=%s error=%v", job.ReviewID, err)
 		}
 	}()
+
+	cooldownActive, err := s.store.ProviderCooldownActive(ctx)
+	if err != nil {
+		return &JobFailure{Attempt: attempt, TriageAttempt: leaseAttempt, Retryable: true, Err: err}
+	}
+	if cooldownActive {
+		return nil
+	}
 
 	result, err := s.provider.Classify(ctx, review)
 	if err != nil {
@@ -554,69 +608,70 @@ func (s *Service) processJob(parent context.Context, job Job) error {
 			retryable = providerFailure.IsRetryable()
 		}
 		return &JobFailure{
-			Attempt:   attempt,
-			Retryable: retryable,
-			Err:       fmt.Errorf("%w: %w", ErrClassifierFailed, err),
+			Attempt:       attempt,
+			TriageAttempt: leaseAttempt,
+			Retryable:     retryable,
+			Err:           fmt.Errorf("%w: %w", ErrClassifierFailed, err),
 		}
 	}
 	result.Decision = strings.ToLower(strings.TrimSpace(result.Decision))
 	if result.Decision != DecisionPublish && result.Decision != DecisionFlag {
-		return &JobFailure{Attempt: attempt, Err: fmt.Errorf("%w: provider returned an unsupported decision", ErrInvalidDecision)}
+		return &JobFailure{Attempt: attempt, TriageAttempt: leaseAttempt, Err: fmt.Errorf("%w: provider returned an unsupported decision", ErrInvalidDecision)}
 	}
 
 	var modelFlagReason string
 	if result.Decision == DecisionFlag {
 		modelFlagReason, err = formatFlagReason(result)
 		if err != nil {
-			return &JobFailure{Attempt: attempt, Err: err}
+			return &JobFailure{Attempt: attempt, TriageAttempt: leaseAttempt, Err: err}
 		}
 	}
 
-	recent, err := s.store.ListRecentByCourse(ctx, review.CourseID, 0)
+	recent, err := s.store.ListRecentByCourse(ctx, review.CourseID, DuplicateHistoryLimit)
 	if err != nil {
-		return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
+		return &JobFailure{Attempt: attempt, TriageAttempt: leaseAttempt, Retryable: true, Err: err}
 	}
 	duplicate, err := s.duplicateDetector.Detect(ctx, review, recent)
 	if err != nil {
-		return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
+		return &JobFailure{Attempt: attempt, TriageAttempt: leaseAttempt, Retryable: true, Err: err}
 	}
 
 	now := time.Now().UTC()
 	windowReviews, err := s.store.ListCourseReviewsInWindow(ctx, review.CourseID, now.Add(-BrigadingWindow), now)
 	if err != nil {
-		return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
+		return &JobFailure{Attempt: attempt, TriageAttempt: leaseAttempt, Retryable: true, Err: err}
 	}
 	if s.brigadingChecker == nil {
-		return &JobFailure{Attempt: attempt, Err: ErrBrigadingUnavailable}
+		return &JobFailure{Attempt: attempt, TriageAttempt: leaseAttempt, Err: ErrBrigadingUnavailable}
 	}
 	check, err := s.brigadingChecker.Check(ctx, review, windowReviews)
 	if err != nil {
-		return &JobFailure{Attempt: attempt, Retryable: true, Err: fmt.Errorf("brigading check: %w", err)}
+		return &JobFailure{Attempt: attempt, TriageAttempt: leaseAttempt, Retryable: true, Err: fmt.Errorf("brigading check: %w", err)}
 	}
 	if check.Detected {
 		if strings.TrimSpace(check.Reason) == "" {
-			return &JobFailure{Attempt: attempt, Err: errors.New("brigading checker returned a detection without a reason")}
+			return &JobFailure{Attempt: attempt, TriageAttempt: leaseAttempt, Err: errors.New("brigading checker returned a detection without a reason")}
 		}
 		ids := uniqueReviewIDs(check.ReviewIDs, review.ID)
 		if err := s.store.FlagReviews(ctx, ids, check.Reason); err != nil {
-			return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
+			return &JobFailure{Attempt: attempt, TriageAttempt: leaseAttempt, Retryable: true, Err: err}
 		}
 		return nil
 	}
 	if modelFlagReason != "" {
-		if err := s.store.UpdateStatus(ctx, review.ID, feedback.StatusFlagged, modelFlagReason); err != nil {
-			return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
+		if err := s.store.UpdateTriageStatus(ctx, review.ID, leaseAttempt, feedback.StatusFlagged, modelFlagReason); err != nil {
+			return &JobFailure{Attempt: attempt, TriageAttempt: leaseAttempt, Retryable: true, Err: err}
 		}
 		return nil
 	}
 	if duplicate.IsDuplicate {
-		if err := s.store.UpdateStatus(ctx, review.ID, feedback.StatusFlagged, duplicate.Explanation); err != nil {
-			return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
+		if err := s.store.UpdateTriageStatus(ctx, review.ID, leaseAttempt, feedback.StatusFlagged, duplicate.Explanation); err != nil {
+			return &JobFailure{Attempt: attempt, TriageAttempt: leaseAttempt, Retryable: true, Err: err}
 		}
 		return nil
 	}
-	if err := s.store.UpdateStatus(ctx, review.ID, feedback.StatusPublished, ""); err != nil {
-		return &JobFailure{Attempt: attempt, Retryable: true, Err: err}
+	if err := s.store.UpdateTriageStatus(ctx, review.ID, leaseAttempt, feedback.StatusPublished, ""); err != nil {
+		return &JobFailure{Attempt: attempt, TriageAttempt: leaseAttempt, Retryable: true, Err: err}
 	}
 	return nil
 }
@@ -648,16 +703,53 @@ func (s *Service) failReview(ctx context.Context, job Job, cause error) {
 	if ctx.Err() != nil {
 		return
 	}
-	repository, ok := s.store.(triageFailureRepository)
+	repository, ok := s.store.(triageRecoveryRepository)
 	if !ok {
-		log.Printf("triage failure state unavailable: review_id=%s attempt=%d error=%v", job.ReviewID, job.Attempt, cause)
+		log.Printf("triage recovery state unavailable: review_id=%s attempt=%d", job.ReviewID, job.Attempt)
 		return
+	}
+	category := triageFailureCategory(cause)
+	cooldown := s.recoveryCooldown
+	var providerFailure *ProviderFailure
+	permanentProviderFailure := errors.As(cause, &providerFailure) && !providerFailure.IsRetryable()
+	if permanentProviderFailure {
+		cooldown = s.providerCooldown
 	}
 	failureCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := repository.MarkTriageFailed(failureCtx, job.ReviewID, feedback.ProcessingFailureMessage); err != nil {
-		log.Printf("could not persist terminal triage failure: review_id=%s attempt=%d error=%v", job.ReviewID, job.Attempt, err)
+	retryAt := time.Now().UTC().Add(cooldown)
+	if permanentProviderFailure {
+		if err := repository.SetProviderCooldown(failureCtx, category, retryAt); err != nil {
+			log.Printf("could not persist provider cooldown: review_id=%s category=%s error=%v", job.ReviewID, category, err)
+		}
 	}
+	if err := repository.DeferTriage(failureCtx, job.ReviewID, job.TriageAttempt, category, retryAt); err != nil {
+		log.Printf("could not defer review triage: review_id=%s category=%s error=%v", job.ReviewID, category, err)
+	}
+}
+
+func triageFailureCategory(err error) string {
+	var providerFailure *ProviderFailure
+	if errors.As(err, &providerFailure) {
+		switch {
+		case providerFailure.Status == 401 || providerFailure.Status == 403:
+			return "provider_auth"
+		case providerFailure.Kind == "invalid response":
+			return "malformed_response"
+		case providerFailure.Kind == "network error" || providerFailure.Kind == "deadline exceeded":
+			return "transient_provider"
+		case providerFailure.Status != 0 && providerFailure.Retryable:
+			return "transient_provider"
+		case providerFailure.Status == 400:
+			return "provider_request"
+		default:
+			return "provider_error"
+		}
+	}
+	if errors.Is(err, ErrInvalidDecision) {
+		return "invalid_classification"
+	}
+	return "triage_processing"
 }
 
 func formatFlagReason(result AIResult) (string, error) {
@@ -763,6 +855,12 @@ func NewSimilarityDuplicateDetector(threshold float64) DuplicateDetector {
 }
 
 func (d *similarityDetector) Detect(ctx context.Context, review feedback.Feedback, previous []feedback.Feedback) (DuplicateResult, error) {
+	if err := ctx.Err(); err != nil {
+		return DuplicateResult{}, err
+	}
+	if duplicateWordCount(review.Content) < MinDuplicateReviewWords {
+		return DuplicateResult{ReasonCode: "not_duplicate"}, nil
+	}
 	for _, candidate := range previous {
 		if err := ctx.Err(); err != nil {
 			return DuplicateResult{}, err
@@ -774,6 +872,9 @@ func (d *similarityDetector) Detect(ctx context.Context, review feedback.Feedbac
 			continue
 		}
 		if !isEarlierReview(candidate, review) {
+			continue
+		}
+		if duplicateWordCount(candidate.Content) < MinDuplicateReviewWords {
 			continue
 		}
 		similarity := textSimilarity(review.Content, candidate.Content)
@@ -854,18 +955,23 @@ func tokenCounts(text string) map[string]float64 {
 func normalizeText(text string) string {
 	lower := strings.ToLower(text)
 	lower = strings.Map(func(char rune) rune {
-		switch {
-		case char >= 'a' && char <= 'z':
+		if unicode.IsLetter(char) || unicode.IsNumber(char) || unicode.IsMark(char) {
 			return char
-		case char >= '0' && char <= '9':
-			return char
-		case char == ' ' || char == '\n' || char == '\t':
-			return ' '
-		default:
+		}
+		if unicode.IsSpace(char) {
 			return ' '
 		}
+		return ' '
 	}, lower)
 	return strings.Join(strings.Fields(lower), " ")
+}
+
+func duplicateWordCount(text string) int {
+	normalized := normalizeText(text)
+	if normalized == "" {
+		return 0
+	}
+	return len(strings.Fields(normalized))
 }
 
 func prioritizeReviews(reviews []feedback.Feedback) []feedback.Feedback {

@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net/mail"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -19,33 +20,41 @@ import (
 )
 
 const (
-	RoleStudent       = "student"
-	RoleModerator     = "moderator"
-	RoleAdministrator = "administrator"
-	SessionDuration   = 12 * time.Hour
-	OTPDuration       = 10 * time.Minute
-	OTPMaxAttempts    = 5
-	OTPMaxResends     = 5
-	OTPResendCooldown = 60 * time.Second
-	OTPLength         = 6
-	minPasswordLength = 6
-	maxPasswordBytes  = 72
+	RoleStudent                 = "student"
+	RoleModerator               = "moderator"
+	RoleAdministrator           = "administrator"
+	SessionDuration             = 12 * time.Hour
+	OTPDuration                 = 10 * time.Minute
+	OTPMaxAttempts              = 5
+	OTPMaxResends               = 5
+	OTPResendCooldown           = 60 * time.Second
+	OTPLength                   = 6
+	minPasswordLength           = 6
+	privilegedPasswordMinLength = 12
+	maxPasswordBytes            = 72
+	loginFailureLimit           = 5
+	loginFailureWindow          = 15 * time.Minute
+	otpRequestLimit             = 5
+	otpRequestWindow            = 10 * time.Minute
+	dummyPasswordHash           = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
 )
 
 var (
-	ErrInvalidCredentials = errors.New("invalid email or password")
-	ErrEmailAlreadyExists = errors.New("email is already registered")
-	ErrInvalidSession     = errors.New("invalid or expired session")
-	ErrInvalidInput       = errors.New("invalid authentication input")
-	ErrInvalidOTP         = errors.New("invalid or expired OTP")
-	ErrOTPAttempts        = errors.New("OTP attempts exceeded")
-	ErrOTPResendTooSoon   = errors.New("OTP resend requested too soon")
-	ErrOTPResends         = errors.New("OTP resend limit exceeded")
-	ErrEmailNotAllowed    = errors.New("only IITK email addresses are allowed")
-	ErrEmailService       = errors.New("email service is unavailable")
-	ErrPasswordSetup      = errors.New("student password setup is unavailable")
-	ErrModeratorNotFound  = errors.New("moderator account not found")
-	ErrRoleMismatch       = errors.New("account role does not match this login")
+	ErrInvalidCredentials    = errors.New("invalid email or password")
+	ErrEmailAlreadyExists    = errors.New("email is already registered")
+	ErrInvalidSession        = errors.New("invalid or expired session")
+	ErrInvalidInput          = errors.New("invalid authentication input")
+	ErrInvalidOTP            = errors.New("invalid or expired OTP")
+	ErrOTPAttempts           = errors.New("OTP attempts exceeded")
+	ErrOTPResendTooSoon      = errors.New("OTP resend requested too soon")
+	ErrOTPResends            = errors.New("OTP resend limit exceeded")
+	ErrEmailNotAllowed       = errors.New("only IITK email addresses are allowed")
+	ErrEmailService          = errors.New("email service is unavailable")
+	ErrPasswordSetup         = errors.New("student password setup is unavailable")
+	ErrModeratorNotFound     = errors.New("moderator account not found")
+	ErrRoleMismatch          = errors.New("account role does not match this login")
+	ErrLoginRateLimited      = errors.New("login attempts temporarily limited")
+	ErrOTPRequestRateLimited = errors.New("OTP requests temporarily limited")
 )
 
 type User struct {
@@ -88,7 +97,7 @@ type otpRepository interface {
 	FindOTP(context.Context, string) (OTPChallenge, error)
 	InvalidateOTP(context.Context, string) error
 	CreateOTP(context.Context, OTPChallenge) error
-	IncrementOTPAttempts(context.Context, string) (int, error)
+	ReserveOTPAttempt(context.Context, string, time.Time) (OTPChallenge, error)
 	DeleteOTP(context.Context, string) error
 }
 
@@ -105,9 +114,23 @@ type moderatorRepository interface {
 }
 
 type Service struct {
-	repository Repository
-	email      EmailService
-	now        func() time.Time
+	repository    Repository
+	email         EmailService
+	now           func() time.Time
+	loginMu       sync.Mutex
+	loginFailures map[string]loginFailureState
+	otpMu         sync.Mutex
+	otpRequests   map[string]otpRequestState
+}
+
+type loginFailureState struct {
+	count int
+	first time.Time
+}
+
+type otpRequestState struct {
+	count int
+	first time.Time
 }
 
 func NewService(repository Repository, emailServices ...EmailService) *Service {
@@ -115,7 +138,13 @@ func NewService(repository Repository, emailServices ...EmailService) *Service {
 	if len(emailServices) > 0 {
 		email = emailServices[0]
 	}
-	return &Service{repository: repository, email: email, now: time.Now}
+	return &Service{
+		repository:    repository,
+		email:         email,
+		now:           time.Now,
+		loginFailures: make(map[string]loginFailureState),
+		otpRequests:   make(map[string]otpRequestState),
+	}
 }
 
 func (s *Service) RequestOTP(ctx context.Context, email, password, confirmPassword string) error {
@@ -126,6 +155,9 @@ func (s *Service) RequestOTP(ctx context.Context, email, password, confirmPasswo
 	if password != confirmPassword || validatePassword(password) != nil {
 		return ErrInvalidInput
 	}
+	if !s.reserveOTPRequest(normalized, s.now().UTC()) {
+		return ErrOTPRequestRateLimited
+	}
 	store, ok := s.repository.(otpRepository)
 	if !ok || s.email == nil {
 		return ErrEmailService
@@ -133,7 +165,8 @@ func (s *Service) RequestOTP(ctx context.Context, email, password, confirmPasswo
 	existingUser, existingHash, findErr := s.repository.FindUserByEmail(ctx, normalized)
 	if findErr == nil {
 		if existingUser.Role != RoleStudent || existingHash != "" {
-			return ErrEmailAlreadyExists
+			_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(password))
+			return nil
 		}
 	} else if !errors.Is(findErr, ErrInvalidCredentials) {
 		return fmt.Errorf("check existing user: %w", findErr)
@@ -192,21 +225,14 @@ func (s *Service) VerifyOTP(ctx context.Context, email, code string, registratio
 	if !storeOK || !studentsOK {
 		return Session{}, ErrInvalidOTP
 	}
-	challenge, err := store.FindOTP(ctx, normalized)
-	if err != nil || s.now().UTC().After(challenge.ExpiresAt) {
-		return Session{}, ErrInvalidOTP
-	}
-	if challenge.Attempts >= OTPMaxAttempts {
+	challenge, err := store.ReserveOTPAttempt(ctx, normalized, s.now().UTC())
+	if errors.Is(err, ErrOTPAttempts) {
 		return Session{}, ErrOTPAttempts
 	}
+	if err != nil {
+		return Session{}, fmt.Errorf("reserve OTP attempt: %w", err)
+	}
 	if !secureOTPMatch(challenge.OTPHash, code) {
-		attempts, incrementErr := store.IncrementOTPAttempts(ctx, normalized)
-		if incrementErr != nil {
-			return Session{}, fmt.Errorf("record OTP attempt: %w", incrementErr)
-		}
-		if attempts >= OTPMaxAttempts {
-			return Session{}, ErrOTPAttempts
-		}
 		return Session{}, ErrInvalidOTP
 	}
 	registrationPassword := ""
@@ -285,6 +311,9 @@ func (s *Service) ProvisionModerator(ctx context.Context, email, password string
 		return User{}, ErrInvalidInput
 	}
 
+	if validatePrivilegedPassword(password) != nil {
+		return User{}, ErrInvalidInput
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return User{}, fmt.Errorf("hash moderator password: %w", err)
@@ -320,6 +349,9 @@ func (s *Service) CreateAdministrator(ctx context.Context, email, password strin
 	if err != nil || validatePassword(password) != nil {
 		return User{}, ErrInvalidInput
 	}
+	if validatePrivilegedPassword(password) != nil {
+		return User{}, ErrInvalidInput
+	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -333,34 +365,45 @@ func (s *Service) CreateAdministrator(ctx context.Context, email, password strin
 }
 
 func (s *Service) Login(ctx context.Context, email, password string) (Session, error) {
+	return s.loginWithRole(ctx, email, password, "")
+}
+
+func (s *Service) loginWithRole(ctx context.Context, email, password, requiredRole string) (Session, error) {
 	email, err := normalizeEmail(email)
 	if err != nil || password == "" || len(password) > maxPasswordBytes {
 		return Session{}, ErrInvalidCredentials
 	}
+	if s.loginLimited(email, s.now().UTC()) {
+		return Session{}, ErrLoginRateLimited
+	}
 
 	user, hash, err := s.repository.FindUserByEmail(ctx, email)
 	if err != nil {
+		if errors.Is(err, ErrInvalidCredentials) {
+			_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(password))
+			s.recordLoginFailure(email, s.now().UTC())
+		}
 		return Session{}, err
 	}
 	if hash == "" {
+		_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(password))
+		s.recordLoginFailure(email, s.now().UTC())
 		return Session{}, ErrInvalidCredentials
 	}
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
+		s.recordLoginFailure(email, s.now().UTC())
 		return Session{}, ErrInvalidCredentials
 	}
+	if requiredRole != "" && user.Role != requiredRole {
+		s.recordLoginFailure(email, s.now().UTC())
+		return Session{}, ErrInvalidCredentials
+	}
+	s.clearLoginFailures(email)
 	return s.createSession(ctx, user)
 }
 
 func (s *Service) LoginAs(ctx context.Context, email, password, role string) (Session, error) {
-	session, err := s.Login(ctx, email, password)
-	if err != nil {
-		return Session{}, err
-	}
-	if session.User.Role != role {
-		_ = s.Logout(ctx, session.AccessToken)
-		return Session{}, ErrRoleMismatch
-	}
-	return session, nil
+	return s.loginWithRole(ctx, email, password, role)
 }
 
 func (s *Service) Authenticate(ctx context.Context, token string) (User, error) {
@@ -449,11 +492,59 @@ func allDigits(value string) bool {
 }
 
 func validatePassword(password string) error {
+	return validatePasswordMinimum(password, minPasswordLength)
+}
+
+func validatePrivilegedPassword(password string) error {
+	return validatePasswordMinimum(password, privilegedPasswordMinLength)
+}
+
+func validatePasswordMinimum(password string, minimum int) error {
 	length := utf8.RuneCountInString(password)
-	if length < minPasswordLength || len(password) > maxPasswordBytes {
+	if length < minimum || len(password) > maxPasswordBytes {
 		return ErrInvalidInput
 	}
 	return nil
+}
+
+func (s *Service) reserveOTPRequest(email string, now time.Time) bool {
+	s.otpMu.Lock()
+	defer s.otpMu.Unlock()
+	state := s.otpRequests[email]
+	if state.first.IsZero() || now.Sub(state.first) >= otpRequestWindow {
+		s.otpRequests[email] = otpRequestState{count: 1, first: now}
+		return true
+	}
+	if state.count >= otpRequestLimit {
+		return false
+	}
+	state.count++
+	s.otpRequests[email] = state
+	return true
+}
+
+func (s *Service) loginLimited(email string, now time.Time) bool {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	state := s.loginFailures[email]
+	return !state.first.IsZero() && now.Sub(state.first) < loginFailureWindow && state.count >= loginFailureLimit
+}
+
+func (s *Service) recordLoginFailure(email string, now time.Time) {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	state := s.loginFailures[email]
+	if state.first.IsZero() || now.Sub(state.first) >= loginFailureWindow {
+		state = loginFailureState{first: now}
+	}
+	state.count++
+	s.loginFailures[email] = state
+}
+
+func (s *Service) clearLoginFailures(email string) {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	delete(s.loginFailures, email)
 }
 
 func hashToken(token string) string {
