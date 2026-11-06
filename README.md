@@ -179,6 +179,11 @@ against at most the latest 200 same-course reviews. Retry backoff is scheduled
 asynchronously, so waiting for a retry does not occupy a worker.
 Pending `submitted` reviews are rediscovered from MongoDB after startup and
 periodically, so a full in-memory queue does not lose persisted submissions.
+After a retry cycle is exhausted, a review stays `submitted` and is deferred
+for five minutes before another bounded retry cycle. Permanent provider
+failures apply a 15-minute cooldown to submitted reviews to avoid repeatedly
+calling Gemini with invalid configuration. Historical attempt counts are
+preserved, and eligible deferred reviews are recovered after backend restarts.
 
 `BRIGADING_MODE=development-noop` is accepted only with
 `APP_ENV=development`; it intentionally disables brigading detection.

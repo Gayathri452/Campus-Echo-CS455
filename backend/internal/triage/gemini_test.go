@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -164,6 +167,10 @@ func TestGeminiProviderClassifiesUpstreamHTTPFailures(t *testing.T) {
 		status    int
 		retryable bool
 	}{
+		{status: 408, retryable: true},
+		{status: 429, retryable: true},
+		{status: 500, retryable: true},
+		{status: 502, retryable: true},
 		{status: 503, retryable: true},
 		{status: 504, retryable: true},
 		{status: 401, retryable: false},
@@ -185,6 +192,59 @@ func TestGeminiProviderClassifiesUpstreamHTTPFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGeminiProviderRetriesMalformedResponsesAndKnownNetworkInterruptions(t *testing.T) {
+	t.Run("malformed response", func(t *testing.T) {
+		provider := newGeminiProviderWithClient(&fakeGeminiClient{
+			response: geminiTextResponse("{"),
+		}, "test-model", time.Second)
+		_, err := provider.Classify(context.Background(), feedback.Feedback{Content: "Review"})
+		var providerFailure *ProviderFailure
+		if !errors.As(err, &providerFailure) || !providerFailure.IsRetryable() {
+			t.Fatalf("Classify() error = %v, want retryable malformed-response error", err)
+		}
+	})
+
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "unexpected EOF", err: io.ErrUnexpectedEOF},
+		{name: "connection reset", err: &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider := newGeminiProviderWithClient(&fakeGeminiClient{err: test.err}, "test-model", time.Second)
+			_, err := provider.Classify(context.Background(), feedback.Feedback{Content: "Review"})
+			var providerFailure *ProviderFailure
+			if !errors.As(err, &providerFailure) || !providerFailure.IsRetryable() {
+				t.Fatalf("Classify() error = %v, want retryable transport error", err)
+			}
+		})
+	}
+
+	t.Run("network error redaction", func(t *testing.T) {
+		const secret = "AIza0123456789012345678901234567890123"
+		provider := newGeminiProviderWithClient(&fakeGeminiClient{
+			err: fmt.Errorf("connection interrupted after %s: %w", secret, io.ErrUnexpectedEOF),
+		}, "test-model", time.Second)
+		provider.apiKey = secret
+		_, err := provider.Classify(context.Background(), feedback.Feedback{Content: "Review"})
+		if err == nil || strings.Contains(err.Error(), secret) {
+			t.Fatalf("Classify() error exposed the API key: %v", err)
+		}
+	})
+
+	t.Run("unknown error remains non-retryable", func(t *testing.T) {
+		provider := newGeminiProviderWithClient(&fakeGeminiClient{
+			err: errors.New("unclassified provider failure"),
+		}, "test-model", time.Second)
+		_, err := provider.Classify(context.Background(), feedback.Feedback{Content: "Review"})
+		var providerFailure *ProviderFailure
+		if !errors.As(err, &providerFailure) || providerFailure.IsRetryable() {
+			t.Fatalf("Classify() error = %v, want non-retryable unknown provider error", err)
+		}
+	})
 }
 
 func TestGeminiProviderDistinguishesDeadlineAndNetworkTimeout(t *testing.T) {
@@ -216,6 +276,153 @@ func TestGeminiProviderDistinguishesDeadlineAndNetworkTimeout(t *testing.T) {
 			t.Fatalf("Classify() error = %v, want retryable network timeout", err)
 		}
 	})
+}
+
+func TestGeminiWorkerRetriesTransientFailuresWithoutPublishingInvalidResults(t *testing.T) {
+	validResponse := geminiTextResponse(
+		`{"decision":"publish","reasonCode":"acceptable","explanation":"Permissible review."}`,
+	)
+	tests := []struct {
+		name      string
+		responses []struct {
+			response *genai.GenerateContentResponse
+			err      error
+		}
+		wantStatus   string
+		wantCategory string
+		wantCalls    int
+		wantAttempts int
+	}{
+		{
+			name: "HTTP 504 then success",
+			responses: []struct {
+				response *genai.GenerateContentResponse
+				err      error
+			}{
+				{err: genai.APIError{Code: 504, Message: "gateway timeout"}},
+				{response: validResponse},
+			},
+			wantStatus: feedback.StatusPublished, wantCalls: 2, wantAttempts: 2,
+		},
+		{
+			name: "HTTP 504 retry exhaustion",
+			responses: []struct {
+				response *genai.GenerateContentResponse
+				err      error
+			}{
+				{err: genai.APIError{Code: 504, Message: "gateway timeout"}},
+				{err: genai.APIError{Code: 504, Message: "gateway timeout"}},
+				{err: genai.APIError{Code: 504, Message: "gateway timeout"}},
+			},
+			wantStatus: feedback.StatusSubmitted, wantCategory: "transient_provider", wantCalls: 3, wantAttempts: 3,
+		},
+		{
+			name: "malformed JSON then valid response",
+			responses: []struct {
+				response *genai.GenerateContentResponse
+				err      error
+			}{
+				{response: geminiTextResponse("{")},
+				{response: validResponse},
+			},
+			wantStatus: feedback.StatusPublished, wantCalls: 2, wantAttempts: 2,
+		},
+		{
+			name: "malformed JSON retry exhaustion",
+			responses: []struct {
+				response *genai.GenerateContentResponse
+				err      error
+			}{
+				{response: geminiTextResponse("{")},
+				{response: geminiTextResponse("{")},
+				{response: geminiTextResponse("{")},
+			},
+			wantStatus: feedback.StatusSubmitted, wantCategory: "malformed_response", wantCalls: 3, wantAttempts: 3,
+		},
+		{
+			name: "transient network failure then success",
+			responses: []struct {
+				response *genai.GenerateContentResponse
+				err      error
+			}{
+				{err: fmt.Errorf("read Gemini response: %w", io.ErrUnexpectedEOF)},
+				{response: validResponse},
+			},
+			wantStatus: feedback.StatusPublished, wantCalls: 2, wantAttempts: 2,
+		},
+		{
+			name: "authentication failure is not retried",
+			responses: []struct {
+				response *genai.GenerateContentResponse
+				err      error
+			}{
+				{err: genai.APIError{Code: 401, Message: "invalid credentials"}},
+			},
+			wantStatus: feedback.StatusSubmitted, wantCategory: "provider_auth", wantCalls: 1, wantAttempts: 1,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			review := feedback.Feedback{
+				ID:        "review-1",
+				CourseID:  "CS455",
+				Content:   "Review text",
+				Status:    feedback.StatusSubmitted,
+				CreatedAt: time.Now(),
+			}
+			repository := newMemoryReviewRepository(review)
+			var mu sync.Mutex
+			calls := 0
+			client := &fakeGeminiClient{
+				generate: func(context.Context, string, []*genai.Content, *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+					mu.Lock()
+					defer mu.Unlock()
+					if calls >= len(test.responses) {
+						return nil, errors.New("unexpected additional Gemini request")
+					}
+					step := test.responses[calls]
+					calls++
+					return step.response, step.err
+				},
+			}
+			provider := newGeminiProviderWithClient(client, "test-model", time.Second)
+			service := serviceForTest(
+				repository,
+				provider,
+				WithWorkers(1),
+				WithMaxRetries(2),
+				WithRetryBackoff(time.Millisecond),
+			)
+			service.Start(context.Background())
+			defer service.Stop()
+			if err := service.Dispatch(context.Background(), review.ID); err != nil {
+				t.Fatalf("dispatch review: %v", err)
+			}
+			if test.wantCategory != "" {
+				waitForDeferredCategory(t, repository, review.ID, test.wantCategory)
+			} else {
+				waitForStatus(t, repository, review.ID, test.wantStatus)
+			}
+
+			stored, err := repository.FindByID(context.Background(), review.ID)
+			if err != nil {
+				t.Fatalf("find processed review: %v", err)
+			}
+			mu.Lock()
+			gotCalls := calls
+			mu.Unlock()
+			if gotCalls != test.wantCalls || stored.TriageAttempts != test.wantAttempts {
+				t.Fatalf("calls/attempts = %d/%d, want %d/%d", gotCalls, stored.TriageAttempts, test.wantCalls, test.wantAttempts)
+			}
+			if stored.Status != test.wantStatus {
+				t.Fatalf("review status = %q, want %q", stored.Status, test.wantStatus)
+			}
+			if test.wantCategory != "" && stored.Status == feedback.StatusPublished {
+				t.Fatal("invalid or failed classification published the review")
+			}
+		})
+	}
 }
 
 func TestGeminiProviderSmoke(t *testing.T) {

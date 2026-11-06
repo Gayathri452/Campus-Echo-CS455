@@ -17,12 +17,13 @@ import (
 )
 
 type Mongo struct {
-	client             *mongo.Client
-	feedbackCollection *mongo.Collection
-	userCollection     *mongo.Collection
-	sessionCollection  *mongo.Collection
-	otpCollection      *mongo.Collection
-	appealCollection   *mongo.Collection
+	client                *mongo.Client
+	feedbackCollection    *mongo.Collection
+	triageStateCollection *mongo.Collection
+	userCollection        *mongo.Collection
+	sessionCollection     *mongo.Collection
+	otpCollection         *mongo.Collection
+	appealCollection      *mongo.Collection
 }
 
 type feedbackRecord struct {
@@ -41,6 +42,9 @@ type feedbackRecord struct {
 	FlagReason             string             `bson:"flagReason,omitempty"`
 	ProcessingError        string             `bson:"processingError,omitempty"`
 	TriageAttempts         int                `bson:"triageAttempts,omitempty"`
+	TriageCycleAttempts    int                `bson:"triageCycleAttempts,omitempty"`
+	TriageFailureCategory  string             `bson:"triageFailureCategory,omitempty"`
+	TriageRetryAt          *time.Time         `bson:"triageRetryAt,omitempty"`
 	CreatedAt              time.Time          `bson:"createdAt"`
 	PublishedAt            *time.Time         `bson:"publishedAt,omitempty"`
 }
@@ -62,6 +66,9 @@ func (r feedbackRecord) feedback() feedback.Feedback {
 		FlagReason:             r.FlagReason,
 		ProcessingError:        r.ProcessingError,
 		TriageAttempts:         r.TriageAttempts,
+		TriageCycleAttempts:    r.TriageCycleAttempts,
+		TriageFailureCategory:  r.TriageFailureCategory,
+		TriageRetryAt:          r.TriageRetryAt,
 		CreatedAt:              r.CreatedAt,
 		PublishedAt:            r.PublishedAt,
 	}
@@ -84,12 +91,13 @@ func Connect(ctx context.Context, uri, databaseName string) (*Mongo, error) {
 
 	database := client.Database(databaseName)
 	store := &Mongo{
-		client:             client,
-		feedbackCollection: database.Collection("feedback"),
-		userCollection:     database.Collection("users"),
-		sessionCollection:  database.Collection("sessions"),
-		otpCollection:      database.Collection("otp_challenges"),
-		appealCollection:   database.Collection("appeals"),
+		client:                client,
+		feedbackCollection:    database.Collection("feedback"),
+		triageStateCollection: database.Collection("triage_state"),
+		userCollection:        database.Collection("users"),
+		sessionCollection:     database.Collection("sessions"),
+		otpCollection:         database.Collection("otp_challenges"),
+		appealCollection:      database.Collection("appeals"),
 	}
 	if err := store.ensureAuthIndexes(ctx); err != nil {
 		disconnectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -538,6 +546,13 @@ func (m *Mongo) FindByID(ctx context.Context, id string) (feedback.Feedback, err
 }
 
 func (m *Mongo) ClaimForTriage(ctx context.Context, id string, lease time.Duration) (feedback.Feedback, bool, error) {
+	active, err := m.ProviderCooldownActive(ctx)
+	if err != nil {
+		return feedback.Feedback{}, false, err
+	}
+	if active {
+		return feedback.Feedback{}, false, nil
+	}
 	objectID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return feedback.Feedback{}, false, fmt.Errorf("parse review ID for triage claim: %w", err)
@@ -549,14 +564,20 @@ func (m *Mongo) ClaimForTriage(ctx context.Context, id string, lease time.Durati
 		bson.M{
 			"_id":    objectID,
 			"status": feedback.StatusSubmitted,
-			"$or": []bson.M{
-				{"triageLeaseUntil": bson.M{"$exists": false}},
-				{"triageLeaseUntil": bson.M{"$lte": now}},
+			"$and": []bson.M{
+				{"$or": []bson.M{
+					{"triageLeaseUntil": bson.M{"$exists": false}},
+					{"triageLeaseUntil": bson.M{"$lte": now}},
+				}},
+				{"$or": []bson.M{
+					{"triageRetryAt": bson.M{"$exists": false}},
+					{"triageRetryAt": bson.M{"$lte": now}},
+				}},
 			},
 		},
 		bson.M{
 			"$set":   bson.M{"triageLeaseUntil": now.Add(lease)},
-			"$inc":   bson.M{"triageAttempts": 1},
+			"$inc":   bson.M{"triageAttempts": 1, "triageCycleAttempts": 1},
 			"$unset": bson.M{"processingError": ""},
 		},
 		options.FindOneAndUpdate().SetReturnDocument(options.After),
@@ -570,14 +591,14 @@ func (m *Mongo) ClaimForTriage(ctx context.Context, id string, lease time.Durati
 	return record.feedback(), true, nil
 }
 
-func (m *Mongo) ReleaseTriage(ctx context.Context, id string) error {
+func (m *Mongo) ReleaseTriageAttempt(ctx context.Context, id string, attempt int) error {
 	objectID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return fmt.Errorf("parse review ID for triage lease release: %w", err)
 	}
 	_, err = m.feedbackCollection.UpdateOne(
 		ctx,
-		bson.M{"_id": objectID, "status": feedback.StatusSubmitted},
+		bson.M{"_id": objectID, "status": feedback.StatusSubmitted, "triageAttempts": attempt},
 		bson.M{"$unset": bson.M{"triageLeaseUntil": ""}},
 	)
 	if err != nil {
@@ -587,6 +608,14 @@ func (m *Mongo) ReleaseTriage(ctx context.Context, id string) error {
 }
 
 func (m *Mongo) UpdateStatus(ctx context.Context, id, status, reason string) error {
+	return m.updateStatus(ctx, id, nil, status, reason)
+}
+
+func (m *Mongo) UpdateTriageStatus(ctx context.Context, id string, attempt int, status, reason string) error {
+	return m.updateStatus(ctx, id, &attempt, status, reason)
+}
+
+func (m *Mongo) updateStatus(ctx context.Context, id string, attempt *int, status, reason string) error {
 	objectID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return fmt.Errorf("parse review ID: %w", err)
@@ -595,7 +624,11 @@ func (m *Mongo) UpdateStatus(ctx context.Context, id, status, reason string) err
 		return fmt.Errorf("unsupported triage status %q", status)
 	}
 	set := bson.M{"status": status}
-	unset := bson.M{"triageLeaseUntil": ""}
+	unset := bson.M{
+		"triageLeaseUntil":      "",
+		"triageRetryAt":         "",
+		"triageFailureCategory": "",
+	}
 	if reason == "" {
 		unset["flagReason"] = ""
 	} else {
@@ -608,7 +641,12 @@ func (m *Mongo) UpdateStatus(ctx context.Context, id, status, reason string) err
 	}
 	unset["processingError"] = ""
 	update := bson.M{"$set": set, "$unset": unset}
-	result, err := m.feedbackCollection.UpdateOne(ctx, bson.M{"_id": objectID, "status": feedback.StatusSubmitted}, update)
+	filter := bson.M{"_id": objectID, "status": feedback.StatusSubmitted}
+	if attempt != nil {
+		filter["triageAttempts"] = *attempt
+		filter["triageLeaseUntil"] = bson.M{"$gt": time.Now().UTC()}
+	}
+	result, err := m.feedbackCollection.UpdateOne(ctx, filter, update)
 	if err != nil {
 		return fmt.Errorf("update review status: %w", err)
 	}
@@ -661,6 +699,70 @@ func (m *Mongo) MarkTriageFailed(ctx context.Context, id, reason string) error {
 	return nil
 }
 
+func (m *Mongo) DeferTriage(ctx context.Context, id string, attempt int, category string, retryAt time.Time) error {
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return fmt.Errorf("parse review ID for triage deferral: %w", err)
+	}
+	result, err := m.feedbackCollection.UpdateOne(
+		ctx,
+		bson.M{
+			"_id":            objectID,
+			"status":         feedback.StatusSubmitted,
+			"triageAttempts": attempt,
+			"$or": []bson.M{
+				{"triageLeaseUntil": bson.M{"$exists": false}},
+				{"triageLeaseUntil": bson.M{"$lte": time.Now().UTC()}},
+			},
+		},
+		bson.M{
+			"$set": bson.M{
+				"triageFailureCategory": category,
+				"triageRetryAt":         retryAt.UTC(),
+				"triageCycleAttempts":   0,
+			},
+			"$unset": bson.M{"triageLeaseUntil": ""},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("defer review triage: %w", err)
+	}
+	if result.MatchedCount == 0 {
+		return feedback.ErrReviewNotEligible
+	}
+	return nil
+}
+
+func (m *Mongo) SetProviderCooldown(ctx context.Context, category string, retryAt time.Time) error {
+	_, err := m.triageStateCollection.UpdateOne(
+		ctx,
+		bson.M{"_id": "provider_cooldown"},
+		bson.M{
+			"$max": bson.M{"retryAt": retryAt.UTC()},
+			"$set": bson.M{"failureCategory": category},
+		},
+		options.Update().SetUpsert(true),
+	)
+	if err != nil {
+		return fmt.Errorf("persist triage provider cooldown: %w", err)
+	}
+	return nil
+}
+
+func (m *Mongo) ProviderCooldownActive(ctx context.Context) (bool, error) {
+	var state struct {
+		RetryAt time.Time `bson:"retryAt"`
+	}
+	err := m.triageStateCollection.FindOne(ctx, bson.M{"_id": "provider_cooldown"}).Decode(&state)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read triage provider cooldown: %w", err)
+	}
+	return time.Now().UTC().Before(state.RetryAt), nil
+}
+
 func (m *Mongo) FlagReviews(ctx context.Context, ids []string, reason string) error {
 	if strings.TrimSpace(reason) == "" {
 		return errors.New("flag reason must not be empty")
@@ -696,6 +798,13 @@ func (m *Mongo) FlagReviews(ctx context.Context, ids []string, reason string) er
 }
 
 func (m *Mongo) ListSubmitted(ctx context.Context, limit int) ([]feedback.Feedback, error) {
+	active, err := m.ProviderCooldownActive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if active {
+		return []feedback.Feedback{}, nil
+	}
 	if limit <= 0 {
 		limit = 100
 	}
@@ -704,9 +813,15 @@ func (m *Mongo) ListSubmitted(ctx context.Context, limit int) ([]feedback.Feedba
 		ctx,
 		bson.M{
 			"status": feedback.StatusSubmitted,
-			"$or": []bson.M{
-				{"triageLeaseUntil": bson.M{"$exists": false}},
-				{"triageLeaseUntil": bson.M{"$lte": now}},
+			"$and": []bson.M{
+				{"$or": []bson.M{
+					{"triageLeaseUntil": bson.M{"$exists": false}},
+					{"triageLeaseUntil": bson.M{"$lte": now}},
+				}},
+				{"$or": []bson.M{
+					{"triageRetryAt": bson.M{"$exists": false}},
+					{"triageRetryAt": bson.M{"$lte": now}},
+				}},
 			},
 		},
 		options.Find().
