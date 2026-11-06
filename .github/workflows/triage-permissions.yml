@@ -1,0 +1,88 @@
+name: Triage MongoDB permissions
+
+on:
+  push:
+    paths:
+      - ".github/workflows/triage-permissions.yml"
+      - "backend/go.mod"
+      - "backend/go.sum"
+      - "backend/cmd/api/**"
+      - "backend/internal/config/**"
+      - "backend/internal/database/**"
+  pull_request:
+    paths:
+      - ".github/workflows/triage-permissions.yml"
+      - "backend/go.mod"
+      - "backend/go.sum"
+      - "backend/cmd/api/**"
+      - "backend/internal/config/**"
+      - "backend/internal/database/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  triage-permissions:
+    runs-on: ubuntu-latest
+    env:
+      MONGO_ROOT_USER: root
+      MONGO_ROOT_PASSWORD: ci-only-root-password
+      TRIAGE_TEST_USER: triage-ci
+      TRIAGE_TEST_PASSWORD: ci-only-triage-password
+      TRIAGE_TEST_DATABASE: campusecho_triage_test
+    services:
+      mongodb:
+        image: mongo:7.0
+        env:
+          MONGO_INITDB_ROOT_USERNAME: root
+          MONGO_INITDB_ROOT_PASSWORD: ci-only-root-password
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --username root --password ci-only-root-password --authenticationDatabase admin --eval 'db.adminCommand({ ping: 1 }).ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Create restricted triage role and user
+        env:
+          MONGO_CONTAINER_ID: ${{ job.services.mongodb.id }}
+        run: |
+          docker exec "$MONGO_CONTAINER_ID" mongosh --quiet \
+            --username "$MONGO_ROOT_USER" \
+            --password "$MONGO_ROOT_PASSWORD" \
+            --authenticationDatabase admin \
+            --eval "
+              const target = db.getSiblingDB('$TRIAGE_TEST_DATABASE');
+              target.createRole({
+                role: 'campusechoTriageTest',
+                privileges: [{
+                  resource: { db: '$TRIAGE_TEST_DATABASE', collection: 'feedback' },
+                  actions: ['find', 'update']
+                }],
+                roles: []
+              });
+              target.createUser({
+                user: '$TRIAGE_TEST_USER',
+                pwd: '$TRIAGE_TEST_PASSWORD',
+                roles: [{ role: 'campusechoTriageTest', db: '$TRIAGE_TEST_DATABASE' }]
+              });
+            "
+
+      - name: Verify least-privilege boundary
+        working-directory: backend
+        env:
+          TRIAGE_MONGODB_TEST_ADMIN_URI: mongodb://root:ci-only-root-password@localhost:27017/admin?authSource=admin
+          TRIAGE_MONGODB_TEST_URI: mongodb://triage-ci:ci-only-triage-password@localhost:27017/campusecho_triage_test?authSource=campusecho_triage_test
+          TRIAGE_MONGODB_TEST_DATABASE: campusecho_triage_test
+        run: go test ./internal/database -run '^TestTriageMongoLeastPrivilegeIntegration$' -count=1 -v
