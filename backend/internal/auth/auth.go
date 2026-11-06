@@ -36,6 +36,7 @@ const (
 	loginFailureWindow          = 15 * time.Minute
 	otpRequestLimit             = 5
 	otpRequestWindow            = 10 * time.Minute
+	dummyPasswordHash           = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
 )
 
 var (
@@ -164,7 +165,8 @@ func (s *Service) RequestOTP(ctx context.Context, email, password, confirmPasswo
 	existingUser, existingHash, findErr := s.repository.FindUserByEmail(ctx, normalized)
 	if findErr == nil {
 		if existingUser.Role != RoleStudent || existingHash != "" {
-			return ErrEmailAlreadyExists
+			_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(password))
+			return nil
 		}
 	} else if !errors.Is(findErr, ErrInvalidCredentials) {
 		return fmt.Errorf("check existing user: %w", findErr)
@@ -363,6 +365,10 @@ func (s *Service) CreateAdministrator(ctx context.Context, email, password strin
 }
 
 func (s *Service) Login(ctx context.Context, email, password string) (Session, error) {
+	return s.loginWithRole(ctx, email, password, "")
+}
+
+func (s *Service) loginWithRole(ctx context.Context, email, password, requiredRole string) (Session, error) {
 	email, err := normalizeEmail(email)
 	if err != nil || password == "" || len(password) > maxPasswordBytes {
 		return Session{}, ErrInvalidCredentials
@@ -374,15 +380,21 @@ func (s *Service) Login(ctx context.Context, email, password string) (Session, e
 	user, hash, err := s.repository.FindUserByEmail(ctx, email)
 	if err != nil {
 		if errors.Is(err, ErrInvalidCredentials) {
+			_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(password))
 			s.recordLoginFailure(email, s.now().UTC())
 		}
 		return Session{}, err
 	}
 	if hash == "" {
+		_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(password))
 		s.recordLoginFailure(email, s.now().UTC())
 		return Session{}, ErrInvalidCredentials
 	}
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
+		s.recordLoginFailure(email, s.now().UTC())
+		return Session{}, ErrInvalidCredentials
+	}
+	if requiredRole != "" && user.Role != requiredRole {
 		s.recordLoginFailure(email, s.now().UTC())
 		return Session{}, ErrInvalidCredentials
 	}
@@ -391,15 +403,7 @@ func (s *Service) Login(ctx context.Context, email, password string) (Session, e
 }
 
 func (s *Service) LoginAs(ctx context.Context, email, password, role string) (Session, error) {
-	session, err := s.Login(ctx, email, password)
-	if err != nil {
-		return Session{}, err
-	}
-	if session.User.Role != role {
-		_ = s.Logout(ctx, session.AccessToken)
-		return Session{}, ErrRoleMismatch
-	}
-	return session, nil
+	return s.loginWithRole(ctx, email, password, role)
 }
 
 func (s *Service) Authenticate(ctx context.Context, token string) (User, error) {

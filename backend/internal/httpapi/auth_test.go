@@ -185,8 +185,8 @@ func TestRoleSpecificLoginRejectsWrongRole(t *testing.T) {
 	))
 	wrongRoleResponse := httptest.NewRecorder()
 	handler.ServeHTTP(wrongRoleResponse, wrongRole)
-	if wrongRoleResponse.Code != http.StatusForbidden {
-		t.Fatalf("wrong-role status = %d, want %d", wrongRoleResponse.Code, http.StatusForbidden)
+	if wrongRoleResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong-role status = %d, want %d", wrongRoleResponse.Code, http.StatusUnauthorized)
 	}
 
 	correctRole := httptest.NewRequest(http.MethodPost, "/api/auth/moderator/login", strings.NewReader(
