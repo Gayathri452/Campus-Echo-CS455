@@ -365,17 +365,51 @@ func TestCreateFeedbackRejectsInvalidInput(t *testing.T) {
 	}
 	handler := NewServer(store, authService)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/feedback", strings.NewReader(
-		`{"courseId":"CS455","courseTitle":"Software Engineering","professor":"Prof. Rao","year":2026,"category":"teaching","rating":4,"content":" "}`,
-	))
+		`{"courseId":"CS455","courseTitle":"Software Engineering","professor":"Prof. Rao","year":2026,"category":"teaching","rating":4,"content":" "}`))
 	request.Header.Set("Authorization", "Bearer "+session.AccessToken)
 	response := httptest.NewRecorder()
 
 	handler.ServeHTTP(response, request)
-
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
 	}
 	if store.created.ID != "" {
 		t.Fatal("invalid feedback must not be stored")
+	}
+}
+
+func TestFeedbackEndpointsRejectMalformedAndUnauthorizedRequests(t *testing.T) {
+	authService := auth.NewService(newMemoryAuthRepository())
+	session, err := authService.RegisterStudent(context.Background(), "student@iitk.ac.in", "long-secure-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(&memoryStore{}, authService)
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		want   int
+	}{
+		{"malformed submission", http.MethodPost, "/api/v1/feedback", `{"courseId":`, http.StatusBadRequest},
+		{"unknown field submission", http.MethodPost, "/api/v1/feedback", `{"unknown":true}`, http.StatusBadRequest},
+		{"missing auth for explore", http.MethodGet, "/api/v1/feedback/explore", "", http.StatusUnauthorized},
+		{"missing auth for ratings", http.MethodGet, "/api/v1/feedback/ratings", "", http.StatusUnauthorized},
+		{"missing auth for status", http.MethodGet, "/api/v1/feedback/status/CE-TEST123", "", http.StatusUnauthorized},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			if test.name == "malformed submission" || test.name == "unknown field submission" {
+				request.Header.Set("Authorization", "Bearer "+session.AccessToken)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.want {
+				t.Fatalf("status = %d, want %d; body: %s", response.Code, test.want, response.Body.String())
+			}
+		})
 	}
 }
