@@ -60,6 +60,13 @@ Prerequisites: Go 1.24+, Node.js 18+, npm, and a MongoDB server.
    files, screenshots, or commits. `.env` is ignored by Git; `.env.example`
    contains placeholders only.
 
+   For production, configure `MONGODB_URI` for the API and
+   `TRIAGE_MONGODB_URI` for a separate least-privilege MongoDB account that can
+   access only the `feedback` collection. Development may omit the triage URI,
+   but then the API credentials are used for triage and the database permission
+   boundary is not enforced. See
+   [the triage MongoDB access guide](./docs/triage-mongodb-access.md).
+
    Start the API in one terminal:
 
    ```powershell
@@ -228,6 +235,14 @@ go test -race ./internal/triage
 go test ./internal/triage -run '^$' -bench 'Benchmark(Duplicate|Brigading)' -benchmem -count=5
 go test ./internal/triage -coverprofile=triage-coverage.out
 go tool cover -func=triage-coverage.out
+```
+
+The MongoDB least-privilege integration test is opt-in; configure the restricted
+test role and the `TRIAGE_MONGODB_TEST_*` variables as described in
+[the triage MongoDB access guide](./docs/triage-mongodb-access.md), then run:
+
+```powershell
+go test ./internal/database -run '^TestTriageMongoLeastPrivilegeIntegration$' -v
 ```
 
 The triage benchmarks measure duplicate comparison against the latest 200

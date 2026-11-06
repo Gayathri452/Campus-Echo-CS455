@@ -47,6 +47,24 @@ func run() error {
 			log.Printf("disconnect from MongoDB: %v", err)
 		}
 	}()
+	triageMongoURI := cfg.TriageMongoURI
+	if triageMongoURI == "" {
+		triageMongoURI = cfg.MongoURI
+		log.Printf("WARNING: TRIAGE_MONGODB_URI is unset; development triage is using the API MongoDB credentials")
+	}
+	triageConnectCtx, cancelTriageConnect := context.WithTimeout(ctx, 10*time.Second)
+	triageStore, err := database.ConnectTriage(triageConnectCtx, triageMongoURI, cfg.MongoDatabase)
+	cancelTriageConnect()
+	if err != nil {
+		return fmt.Errorf("connect triage to restricted MongoDB store: %w", err)
+	}
+	defer func() {
+		disconnectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := triageStore.Disconnect(disconnectCtx); err != nil {
+			log.Printf("disconnect triage MongoDB client: %v", err)
+		}
+	}()
 	var provider triage.Provider
 	switch cfg.TriageProvider {
 	case "development-mock":
@@ -69,7 +87,7 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("initialize Gemini semantic embedding provider: %w", err)
 		}
-		brigadingChecker = triage.NewGeminiBrigadingChecker(embedder, store)
+		brigadingChecker = triage.NewGeminiBrigadingChecker(embedder, triageStore)
 		log.Printf("Gemini brigading detection configured: model=%s, window=%s, minimum reviews=%d, similarity threshold >%.0f%%",
 			cfg.GeminiEmbeddingModel, triage.BrigadingWindow, triage.BrigadingReviewThreshold, triage.BrigadingSimilarityLimit*100)
 	default:
@@ -77,7 +95,7 @@ func run() error {
 		log.Printf("WARNING: BRIGADING_MODE=development-noop; FR-8 brigading detection is not implemented")
 	}
 	triageService := triage.NewService(
-		store,
+		triageStore,
 		provider,
 		triage.WithWorkers(cfg.TriageWorkers),
 		triage.WithQueueSize(cfg.TriageQueueSize),

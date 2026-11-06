@@ -13,6 +13,7 @@ type Config struct {
 	AppEnv                   string
 	Port                     string
 	MongoURI                 string
+	TriageMongoURI           string
 	MongoDatabase            string
 	EmailMode                string
 	SMTPHost                 string
@@ -43,6 +44,7 @@ func Load() Config {
 		AppEnv:                   getEnv("APP_ENV", "development"),
 		Port:                     getEnv("PORT", "8080"),
 		MongoURI:                 getEnv("MONGODB_URI", "mongodb://localhost:27017"),
+		TriageMongoURI:           getEnv("TRIAGE_MONGODB_URI", ""),
 		MongoDatabase:            getEnv("MONGODB_DATABASE", "campusecho"),
 		EmailMode:                getEnv("EMAIL_MODE", "smtp"),
 		SMTPHost:                 getEnv("SMTP_HOST", ""),
@@ -68,6 +70,14 @@ func Load() Config {
 }
 
 func (c Config) Validate() error {
+	if c.AppEnv != "development" {
+		if strings.TrimSpace(c.TriageMongoURI) == "" {
+			return fmt.Errorf("TRIAGE_MONGODB_URI is required outside development")
+		}
+		if strings.TrimSpace(c.TriageMongoURI) == strings.TrimSpace(c.MongoURI) {
+			return fmt.Errorf("TRIAGE_MONGODB_URI must use separate restricted credentials from MONGODB_URI")
+		}
+	}
 	if c.TriageProvider != "gemini" && c.TriageProvider != "development-mock" {
 		return fmt.Errorf("TRIAGE_PROVIDER must be gemini or development-mock")
 	}
