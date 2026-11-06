@@ -310,7 +310,7 @@ func TestTriageProviderCooldownBlocksNewAndExistingReviewsAndExpires(t *testing.
 	if err != nil {
 		t.Fatalf("create existing feedback: %v", err)
 	}
-	retryAt := time.Now().UTC().Add(100 * time.Millisecond)
+	retryAt := time.Now().UTC().Add(5 * time.Minute)
 	if err := store.SetProviderCooldown(ctx, "provider_auth", retryAt); err != nil {
 		t.Fatalf("persist provider cooldown: %v", err)
 	}
@@ -326,6 +326,12 @@ func TestTriageProviderCooldownBlocksNewAndExistingReviewsAndExpires(t *testing.
 	if err != nil {
 		t.Fatalf("create feedback during cooldown: %v", err)
 	}
+	for name, handle := range map[string]*Mongo{"original": store, "restarted": restarted} {
+		active, err := handle.ProviderCooldownActive(ctx)
+		if err != nil || !active {
+			t.Fatalf("%s store cooldown active = (%t, %v), want active", name, active, err)
+		}
+	}
 	pending, err := store.ListSubmitted(ctx, 10)
 	if err != nil {
 		t.Fatalf("list submitted during provider cooldown: %v", err)
@@ -338,10 +344,31 @@ func TestTriageProviderCooldownBlocksNewAndExistingReviewsAndExpires(t *testing.
 			t.Fatalf("claim %s during persisted cooldown = (%t, %v), want not claimed", review.ID, claimed, err)
 		}
 	}
-	time.Sleep(time.Until(retryAt) + 10*time.Millisecond)
+	if !time.Now().UTC().Before(retryAt) {
+		t.Fatal("provider cooldown expired before active-cooldown assertions completed")
+	}
+	// Advance the persisted deadline to model expiration without waiting for wall-clock time.
+	if _, err := store.triageStateCollection.UpdateOne(
+		ctx,
+		bson.M{"_id": "provider_cooldown"},
+		bson.M{"$set": bson.M{"retryAt": time.Now().UTC().Add(-time.Second)}},
+	); err != nil {
+		t.Fatalf("expire persisted provider cooldown: %v", err)
+	}
+	for name, handle := range map[string]*Mongo{"original": store, "restarted": restarted} {
+		active, err := handle.ProviderCooldownActive(ctx)
+		if err != nil || active {
+			t.Fatalf("%s store cooldown active after expiration = (%t, %v), want inactive", name, active, err)
+		}
+	}
 	pending, err = restarted.ListSubmitted(ctx, 10)
 	if err != nil || len(pending) != 2 {
 		t.Fatalf("submitted reviews after cooldown = (%+v, %v), want both reviews", pending, err)
+	}
+	for _, review := range []feedback.Feedback{existing, newlySubmitted} {
+		if _, claimed, err := restarted.ClaimForTriage(ctx, review.ID, time.Minute); err != nil || !claimed {
+			t.Fatalf("claim %s after cooldown expiration = (%t, %v), want claimed", review.ID, claimed, err)
+		}
 	}
 }
 
