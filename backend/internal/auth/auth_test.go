@@ -156,10 +156,58 @@ func TestLoginRejectsInvalidPassword(t *testing.T) {
 	if _, err := service.RegisterStudent(context.Background(), "student@iitk.ac.in", "long-secure-password"); err != nil {
 		t.Fatal(err)
 	}
-
 	_, err := service.Login(context.Background(), "student@iitk.ac.in", "wrong-password")
 	if !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("Login() error = %v, want ErrInvalidCredentials", err)
+	}
+}
+
+func TestLoginRateLimitsRepeatedFailuresAndResetsAfterSuccess(t *testing.T) {
+	repository := newMemoryRepository()
+	service := NewService(repository)
+	if _, err := service.RegisterStudent(context.Background(), "student@iitk.ac.in", "long-secure-password"); err != nil {
+		t.Fatal(err)
+	}
+
+	for attempt := 0; attempt < 5; attempt++ {
+		if _, err := service.Login(context.Background(), "student@iitk.ac.in", "wrong-password"); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("failed login %d error = %v, want ErrInvalidCredentials", attempt+1, err)
+		}
+	}
+	if _, err := service.Login(context.Background(), "student@iitk.ac.in", "wrong-password"); !errors.Is(err, ErrLoginRateLimited) {
+		t.Fatalf("sixth failed login error = %v, want ErrLoginRateLimited", err)
+	}
+	if _, err := service.Login(context.Background(), "student@iitk.ac.in", "long-secure-password"); !errors.Is(err, ErrLoginRateLimited) {
+		t.Fatalf("valid login while limited error = %v, want ErrLoginRateLimited", err)
+	}
+}
+
+func TestPrivilegedAccountsRejectShortPasswords(t *testing.T) {
+	service := NewService(newMemoryRepository())
+	if _, err := service.CreateAdministrator(context.Background(), "admin@example.com", "sixsix"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("short administrator password error = %v, want ErrInvalidInput", err)
+	}
+	if _, err := service.ProvisionModerator(context.Background(), "moderator@example.com", "sixsix"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("short moderator password error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestOTPRequestsRateLimitRepeatedEmailRequests(t *testing.T) {
+	service := NewService(newMemoryRepository(), &memoryEmailService{})
+	for request := 0; request < 5; request++ {
+		err := service.RequestOTP(context.Background(), "student@iitk.ac.in", "long-secure-password", "long-secure-password")
+		if request == 0 {
+			if err != nil {
+				t.Fatalf("first OTP request error = %v", err)
+			}
+			continue
+		}
+		if !errors.Is(err, ErrOTPResendTooSoon) {
+			t.Fatalf("OTP request %d error = %v, want ErrOTPResendTooSoon", request+1, err)
+		}
+	}
+	if err := service.RequestOTP(context.Background(), "student@iitk.ac.in", "long-secure-password", "long-secure-password"); !errors.Is(err, ErrOTPRequestRateLimited) {
+		t.Fatalf("sixth OTP request error = %v, want ErrOTPRequestRateLimited", err)
 	}
 }
 

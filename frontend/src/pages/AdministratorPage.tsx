@@ -139,19 +139,19 @@ function AdministratorPage({ session, onLogout }: AdministratorPageProps) {
 
               <label className="block">
                 <span className="mb-2 block text-sm font-semibold">
-                  Initial password (6–72 characters)
+                  Initial password (12–72 characters)
                 </span>
                 <input
                   autoComplete="new-password"
                   className="w-full rounded-lg border border-ink/15 px-4 py-3 outline-none focus:border-ocean focus:ring-2 focus:ring-ocean/15"
-                  minLength={6}
+                  minLength={12}
                   maxLength={72}
                   name="password"
                   required
                   type="password"
                 />
                 <span className="mt-2 block text-xs text-ink/50">
-                  Use 6–72 characters and deliver it to the staff member securely.
+                  Use 12–72 characters and deliver it to the staff member securely.
                 </span>
               </label>
 

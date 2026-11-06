@@ -40,7 +40,7 @@ Prerequisites: Go 1.24+, Node.js 18+, npm, and a MongoDB server.
    ```
 
    Enter the administrator email and password when prompted; password entry is
-   hidden. The password must be at least 6 characters. This command only
+   hidden. The password must be at least 12 characters. This command only
    creates an administrator and does not reset or reveal existing passwords.
 
 3. Copy the example configuration once. To use Gemini for both AI triage and
