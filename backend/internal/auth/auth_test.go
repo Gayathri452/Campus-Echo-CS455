@@ -201,6 +201,26 @@ func TestLoginRateLimitsRepeatedFailuresAndResetsAfterSuccess(t *testing.T) {
 	}
 }
 
+func TestSuccessfulLoginClearsFailedLoginLimit(t *testing.T) {
+	repository := newMemoryRepository()
+	service := NewService(repository)
+	if _, err := service.RegisterStudent(context.Background(), "student@iitk.ac.in", "long-secure-password"); err != nil {
+		t.Fatal(err)
+	}
+
+	for attempt := 0; attempt < 4; attempt++ {
+		if _, err := service.Login(context.Background(), "student@iitk.ac.in", "wrong-password"); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("failed login %d error = %v, want ErrInvalidCredentials", attempt+1, err)
+		}
+	}
+	if _, err := service.Login(context.Background(), "student@iitk.ac.in", "long-secure-password"); err != nil {
+		t.Fatalf("successful login error = %v", err)
+	}
+	if _, err := service.Login(context.Background(), "student@iitk.ac.in", "wrong-password"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("post-success failed login error = %v, want ErrInvalidCredentials", err)
+	}
+}
+
 func TestPrivilegedAccountsRejectShortPasswords(t *testing.T) {
 	service := NewService(newMemoryRepository())
 	if _, err := service.CreateAdministrator(context.Background(), "admin@example.com", "sixsix"); !errors.Is(err, ErrInvalidInput) {
@@ -313,6 +333,56 @@ func TestOTPRejectsNonIITKEmail(t *testing.T) {
 	service := NewService(newMemoryRepository(), &memoryEmailService{})
 	if err := service.RequestOTP(context.Background(), "student@example.com", "long-secure-password", "long-secure-password"); !errors.Is(err, ErrEmailNotAllowed) {
 		t.Fatalf("RequestOTP() error = %v, want ErrEmailNotAllowed", err)
+	}
+}
+
+func TestOTPRejectsMismatchedPasswordsAndMissingEmailService(t *testing.T) {
+	service := NewService(newMemoryRepository(), &memoryEmailService{})
+	if err := service.RequestOTP(context.Background(), "student@iitk.ac.in", "long-secure-password", "different-password"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("mismatched password error = %v, want ErrInvalidInput", err)
+	}
+
+	service = NewService(newMemoryRepository())
+	if err := service.RequestOTP(context.Background(), "student@iitk.ac.in", "long-secure-password", "long-secure-password"); !errors.Is(err, ErrEmailService) {
+		t.Fatalf("missing email service error = %v, want ErrEmailService", err)
+	}
+}
+
+func TestVerifyOTPRejectsExpiredChallengeBeforeCodeValidation(t *testing.T) {
+	repository := newMemoryRepository()
+	email := "student@iitk.ac.in"
+	repository.otps[email] = OTPChallenge{
+		Email:     email,
+		OTPHash:   hashOTP("123456"),
+		ExpiresAt: time.Now().UTC().Add(-time.Minute),
+	}
+	service := NewService(repository)
+
+	if _, err := service.VerifyOTP(context.Background(), email, "000000"); !errors.Is(err, ErrInvalidOTP) {
+		t.Fatalf("expired OTP error = %v, want ErrInvalidOTP", err)
+	}
+	if repository.otps[email].Attempts != 0 {
+		t.Fatalf("expired OTP attempts = %d, want 0", repository.otps[email].Attempts)
+	}
+}
+
+func TestVerifyOTPRejectsMalformedCodeWithoutReservingAttempt(t *testing.T) {
+	repository := newMemoryRepository()
+	email := "student@iitk.ac.in"
+	repository.otps[email] = OTPChallenge{
+		Email:     email,
+		OTPHash:   hashOTP("123456"),
+		ExpiresAt: time.Now().UTC().Add(time.Minute),
+	}
+	service := NewService(repository)
+
+	for _, code := range []string{"12345", "12345a"} {
+		if _, err := service.VerifyOTP(context.Background(), email, code); !errors.Is(err, ErrInvalidOTP) {
+			t.Fatalf("malformed code %q error = %v, want ErrInvalidOTP", code, err)
+		}
+	}
+	if repository.otps[email].Attempts != 0 {
+		t.Fatalf("malformed-code attempts = %d, want 0", repository.otps[email].Attempts)
 	}
 }
 

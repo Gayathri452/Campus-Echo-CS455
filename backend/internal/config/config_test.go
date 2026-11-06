@@ -87,6 +87,33 @@ func TestConfigValidateRejectsUnsupportedTriageProvider(t *testing.T) {
 	}
 }
 
+func TestConfigValidateRejectsInvalidRuntimeLimits(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"zero workers", func(cfg *Config) { cfg.TriageWorkers = 0 }},
+		{"zero queue", func(cfg *Config) { cfg.TriageQueueSize = 0 }},
+		{"negative retries", func(cfg *Config) { cfg.TriageMaxRetries = -1 }},
+		{"zero backoff", func(cfg *Config) { cfg.TriageRetryBackoff = 0 }},
+		{"zero processing timeout", func(cfg *Config) { cfg.TriageProcessingTimeout = 0 }},
+		{"zero recovery interval", func(cfg *Config) { cfg.TriageRecoveryInterval = 0 }},
+		{"lease not longer than timeout", func(cfg *Config) { cfg.TriageLeaseDuration = cfg.TriageProcessingTimeout }},
+		{"threshold too low", func(cfg *Config) { cfg.TriageDuplicateThreshold = 0 }},
+		{"threshold too high", func(cfg *Config) { cfg.TriageDuplicateThreshold = 1.1 }},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := validConfig("development-mock")
+			test.mutate(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("Validate() succeeded for invalid runtime limit")
+			}
+		})
+	}
+}
+
 func TestLoadReadsGeminiSettingsFromEnvironment(t *testing.T) {
 	t.Setenv("TRIAGE_PROVIDER", "gemini")
 	t.Setenv("BRIGADING_MODE", "gemini")
@@ -100,6 +127,28 @@ func TestLoadReadsGeminiSettingsFromEnvironment(t *testing.T) {
 		cfg.GeminiEmbeddingModel != "test-embedding-model" {
 		t.Fatalf("Load() Gemini configuration = provider %q, brigading mode %q, key present %t, model %q, embedding model %q",
 			cfg.TriageProvider, cfg.BrigadingMode, cfg.GeminiAPIKey != "", cfg.GeminiModel, cfg.GeminiEmbeddingModel)
+	}
+}
+
+func TestLoadParsesTypedEnvironmentValuesAndFallsBackOnInvalidValues(t *testing.T) {
+	t.Setenv("COOKIE_SECURE", "true")
+	t.Setenv("TRIAGE_WORKERS", "4")
+	t.Setenv("TRIAGE_QUEUE_SIZE", "128")
+	t.Setenv("TRIAGE_RETRY_BACKOFF", "3s")
+	t.Setenv("TRIAGE_DUPLICATE_THRESHOLD", "0.91")
+
+	cfg := Load()
+	if !cfg.CookieSecure || cfg.TriageWorkers != 4 || cfg.TriageQueueSize != 128 ||
+		cfg.TriageRetryBackoff != 3*time.Second || cfg.TriageDuplicateThreshold != 0.91 {
+		t.Fatalf("Load() parsed values incorrectly: %+v", cfg)
+	}
+
+	t.Setenv("COOKIE_SECURE", "not-a-bool")
+	t.Setenv("TRIAGE_WORKERS", "not-an-int")
+	t.Setenv("TRIAGE_RETRY_BACKOFF", "not-a-duration")
+	cfg = Load()
+	if cfg.CookieSecure || cfg.TriageWorkers != 2 || cfg.TriageRetryBackoff != 2*time.Second {
+		t.Fatalf("Load() fallback values incorrect: secure=%t workers=%d backoff=%s", cfg.CookieSecure, cfg.TriageWorkers, cfg.TriageRetryBackoff)
 	}
 }
 
