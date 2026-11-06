@@ -76,6 +76,7 @@ function ActiveAppealsPage({ session, onOpenTicket }: ActiveAppealsPageProps) {
             <AppealRow
               key={ticket.id}
               onSelect={() => onOpenTicket(ticket.id)}
+              showLockExpiry
               ticket={ticket}
             />
           ))}

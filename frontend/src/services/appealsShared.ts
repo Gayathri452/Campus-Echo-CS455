@@ -16,6 +16,7 @@ export interface TicketSummary {
   professor: string;
   status: TicketStatus;
   lockedAt?: string;
+  lockExpiresAt?: string;
   createdAt: string;
 }
 

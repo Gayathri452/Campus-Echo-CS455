@@ -27,6 +27,9 @@ function isTicketSummary(value: unknown): value is TicketSummary {
       value.status === "restored" ||
       value.status === "deleted") &&
     (value.lockedAt === undefined || typeof value.lockedAt === "string") &&
+    (value.lockExpiresAt === undefined ||
+      (typeof value.lockExpiresAt === "string" &&
+        Number.isFinite(Date.parse(value.lockExpiresAt)))) &&
     typeof value.createdAt === "string"
   );
 }
