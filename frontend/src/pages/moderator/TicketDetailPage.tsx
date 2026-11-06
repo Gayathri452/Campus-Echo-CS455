@@ -97,7 +97,7 @@ function TicketDetailPage({ session, ticketId, onDone }: TicketDetailPageProps) 
     return <p role="status">Loading appeal details...</p>;
   }
 
-  if (error) {
+  if (!ticket && error) {
     return (
       <p className="rounded-lg bg-rose-50 px-4 py-3 text-sm text-rose-800" role="alert">
         {error}
