@@ -41,8 +41,8 @@ The proposal's boundary cases are important tests:
 
 | ID | Required behavior | Starter status |
 | --- | --- | --- |
-| NFR-1 | Feedback records contain no student-identifying field; preserve the anonymity boundary. | Partial: user credentials and feedback are in separate MongoDB collections and feedback documents have no user ID. A separate MongoDB database role for triage is not implemented. |
-| NFR-2 | The triage agent's database account cannot read the identity collection. | Not implemented |
+| NFR-1 | Feedback records contain no student-identifying field; preserve the anonymity boundary. | Partial: user credentials and feedback are in separate MongoDB collections and feedback documents have no user ID. A separate restricted MongoDB triage account is supported by application wiring, but must be configured and verified for each deployment. |
+| NFR-2 | The triage agent's database account cannot read the identity collection. | Separate API and triage connections are implemented; production requires `TRIAGE_MONGODB_URI`, and an opt-in MongoDB permission integration test verifies feedback access while denying identity reads. Deployment is not compliant until the custom MongoDB role is applied and that test passes. |
 | NFR-3 | Under 50 simultaneous claims on one ticket, exactly one succeeds in every test run. | Atomic implementation and a 50-claim test over 20 rounds exist; Mongo integration execution is environment-dependent and was not run in this review. |
 | NFR-4 | Review submission responds within one second independently of AI-service latency. | Submission persists and non-blockingly dispatches; provider latency is outside the handler. The route and browser workflow were verified locally, but a formal under-one-second load benchmark has not been run. |
 | NFR-5 | Normal-load triage completes within 60 seconds of submission. | Worker count, queue capacity, request timeout, and recovery interval are configurable; no representative normal-load benchmark has been run. |

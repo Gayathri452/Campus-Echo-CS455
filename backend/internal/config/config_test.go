@@ -52,6 +52,28 @@ func TestConfigValidateAllowsGeminiWithCredentials(t *testing.T) {
 	}
 }
 
+func TestConfigValidateRequiresSeparateTriageCredentialsOutsideDevelopment(t *testing.T) {
+	cfg := validConfig("gemini")
+	cfg.AppEnv = "production"
+	cfg.GeminiAPIKey = "test-key"
+	cfg.BrigadingMode = "gemini"
+	cfg.MongoURI = "mongodb://api-user:api-password@db.example/campusecho"
+
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "TRIAGE_MONGODB_URI is required") {
+		t.Fatalf("Validate() error = %v, want missing restricted triage URI error", err)
+	}
+
+	cfg.TriageMongoURI = cfg.MongoURI
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "separate restricted credentials") {
+		t.Fatalf("Validate() error = %v, want separate restricted credentials error", err)
+	}
+
+	cfg.TriageMongoURI = "mongodb://triage-user:triage-password@db.example/campusecho?authSource=campusecho"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with separate triage URI = %v", err)
+	}
+}
+
 func TestConfigValidateRequiresGeminiCredentials(t *testing.T) {
 	cfg := validConfig("gemini")
 	err := cfg.Validate()
