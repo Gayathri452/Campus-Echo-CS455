@@ -65,7 +65,7 @@ func queueInsertTicket(t *testing.T, ctx context.Context, collection *mongo.Coll
 
 func queueTicketFields(status string, createdAt time.Time) bson.M {
 	return bson.M{
-		"referenceCode": "QUEUE-TEST",
+		"referenceCode": "QUEUE-TEST-" + primitive.NewObjectID().Hex(),
 		"courseId":      "CS455",
 		"year":          2026,
 		"professor":     "Prof. Test",

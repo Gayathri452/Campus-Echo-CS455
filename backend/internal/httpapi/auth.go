@@ -253,10 +253,13 @@ func bearerToken(r *http.Request) (string, bool) {
 }
 
 func sessionToken(r *http.Request) (string, bool) {
+	if token, ok := bearerToken(r); ok {
+		return token, true
+	}
 	if cookie, err := r.Cookie(sessionCookieName); err == nil && cookie.Value != "" {
 		return cookie.Value, true
 	}
-	return bearerToken(r)
+	return "", false
 }
 
 func userFromContext(ctx context.Context) (auth.User, bool) {

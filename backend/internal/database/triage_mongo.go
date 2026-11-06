@@ -13,13 +13,17 @@ import (
 type TriageStore interface {
 	FindByID(context.Context, string) (feedback.Feedback, error)
 	ClaimForTriage(context.Context, string, time.Duration) (feedback.Feedback, bool, error)
-	ReleaseTriage(context.Context, string) error
+	ProviderCooldownActive(context.Context) (bool, error)
+	ReleaseTriageAttempt(context.Context, string, int) error
+	UpdateTriageStatus(context.Context, string, int, string, string) error
 	UpdateStatus(context.Context, string, string, string) error
 	FlagReviews(context.Context, []string, string) error
 	ListRecentByCourse(context.Context, string, int) ([]feedback.Feedback, error)
 	ListCourseReviewsInWindow(context.Context, string, time.Time, time.Time) ([]feedback.Feedback, error)
 	SaveSemanticEmbedding(context.Context, string, string, []float32) error
 	ListSubmitted(context.Context, int) ([]feedback.Feedback, error)
+	DeferTriage(context.Context, string, int, string, time.Time) error
+	SetProviderCooldown(context.Context, string, time.Time) error
 	MarkTriageFailed(context.Context, string, string) error
 	Disconnect(context.Context) error
 }
@@ -46,8 +50,9 @@ func ConnectTriage(ctx context.Context, uri, databaseName string) (*TriageMongo,
 
 	return &TriageMongo{
 		store: &Mongo{
-			client:             client,
-			feedbackCollection: client.Database(databaseName).Collection("feedback"),
+			client:                client,
+			feedbackCollection:    client.Database(databaseName).Collection("feedback"),
+			triageStateCollection: client.Database(databaseName).Collection("triage_state"),
 		},
 	}, nil
 }
@@ -60,8 +65,16 @@ func (m *TriageMongo) ClaimForTriage(ctx context.Context, id string, lease time.
 	return m.store.ClaimForTriage(ctx, id, lease)
 }
 
-func (m *TriageMongo) ReleaseTriage(ctx context.Context, id string) error {
-	return m.store.ReleaseTriage(ctx, id)
+func (m *TriageMongo) ProviderCooldownActive(ctx context.Context) (bool, error) {
+	return m.store.ProviderCooldownActive(ctx)
+}
+
+func (m *TriageMongo) ReleaseTriageAttempt(ctx context.Context, id string, attempt int) error {
+	return m.store.ReleaseTriageAttempt(ctx, id, attempt)
+}
+
+func (m *TriageMongo) UpdateTriageStatus(ctx context.Context, id string, attempt int, status, reason string) error {
+	return m.store.UpdateTriageStatus(ctx, id, attempt, status, reason)
 }
 
 func (m *TriageMongo) UpdateStatus(ctx context.Context, id, status, reason string) error {
@@ -86,6 +99,14 @@ func (m *TriageMongo) SaveSemanticEmbedding(ctx context.Context, id, model strin
 
 func (m *TriageMongo) ListSubmitted(ctx context.Context, limit int) ([]feedback.Feedback, error) {
 	return m.store.ListSubmitted(ctx, limit)
+}
+
+func (m *TriageMongo) DeferTriage(ctx context.Context, id string, attempt int, category string, retryAt time.Time) error {
+	return m.store.DeferTriage(ctx, id, attempt, category, retryAt)
+}
+
+func (m *TriageMongo) SetProviderCooldown(ctx context.Context, category string, retryAt time.Time) error {
+	return m.store.SetProviderCooldown(ctx, category, retryAt)
 }
 
 func (m *TriageMongo) MarkTriageFailed(ctx context.Context, id, reason string) error {

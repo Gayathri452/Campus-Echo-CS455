@@ -88,8 +88,8 @@ func TestResolveAppealRequiresDeleteComment(t *testing.T) {
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d; body: %s", response.Code, http.StatusBadRequest, response.Body.String())
 	}
-	if store.resolveCalls != 1 || store.resolveAction != appeals.ActionDelete || store.resolveComment != "" {
-		t.Fatalf("resolve called with action %q and comment %q (%d calls)", store.resolveAction, store.resolveComment, store.resolveCalls)
+	if store.resolveCalls != 0 {
+		t.Fatalf("resolve store called %d times for a missing delete comment, want 0", store.resolveCalls)
 	}
 }
 

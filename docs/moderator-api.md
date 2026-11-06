@@ -83,9 +83,10 @@ API's periodic purge worker.
 
 ## Endpoints
 
-All require `Authorization: Bearer <token>` of a **moderator**. No token gives
-401 and a student or administrator token gives 403. Errors are
-`{"error": "message"}`. Base path `/api/v1`.
+All require `Authorization: Bearer <token>` of a **moderator**. If both a
+Bearer token and session cookie are present, the Bearer token takes precedence;
+the cookie is a fallback. No token gives 401 and a student or administrator
+token gives 403. Errors are `{"error": "message"}`. Base path `/api/v1`.
 
 | Method and path | Owner | Success | Errors |
 | --- | --- | --- | --- |
@@ -101,7 +102,7 @@ All require `Authorization: Bearer <token>` of a **moderator**. No token gives
 - The 409 message is `This ticket has already been claimed`.
 - `resolve` body: `{"action": "restore"}` or
   `{"action": "delete", "comment": "why it breaks the guidelines"}`.
-  `comment` is required for `delete`.
+  `comment` is required and must contain non-whitespace text for `delete`.
 
 `Summary` (queue and active rows, and the claim result):
 

@@ -127,11 +127,8 @@ func (m *Mongo) ExtendLock(ctx context.Context, ticketID, moderatorID string) (t
 }
 
 func (m *Mongo) Resolve(ctx context.Context, ticketID, moderatorID, action, comment string) error {
-	if action != appeals.ActionRestore && action != appeals.ActionDelete {
-		return appeals.ErrInvalidAction
-	}
-	if action == appeals.ActionDelete && comment == "" {
-		return appeals.ErrCommentRequired
+	if err := appeals.ValidateResolution(action, comment); err != nil {
+		return err
 	}
 	id, err := primitive.ObjectIDFromHex(ticketID)
 	if err != nil {
@@ -242,10 +239,13 @@ func (m *Mongo) PurgeDeletedReviews(ctx context.Context, before time.Time) (int6
 	for _, ticket := range tickets {
 		reviewID, err := primitive.ObjectIDFromHex(ticket.ReviewID)
 		if err != nil {
-			return 0, fmt.Errorf("parse review ID for deleted appeal %s: %w", ticket.ID.Hex(), err)
+			continue
 		}
 		ticketIDs = append(ticketIDs, ticket.ID)
 		reviewIDs = append(reviewIDs, reviewID)
+	}
+	if len(ticketIDs) == 0 {
+		return 0, nil
 	}
 
 	if _, err := m.feedbackCollection.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": reviewIDs}}); err != nil {

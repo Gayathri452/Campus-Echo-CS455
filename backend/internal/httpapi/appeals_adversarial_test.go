@@ -106,24 +106,41 @@ func TestAdversarialResolveBodies(t *testing.T) {
 
 func TestKnownBug_WhitespaceDeleteComment(t *testing.T) {
 	// Bug: whitespace-only delete comments are accepted instead of rejected.
-	store := &moderatorAppealTestStore{resolveFn: func(context.Context, string, string, string, string) error { return nil }}
+	resolveCalled := false
+	store := &moderatorAppealTestStore{resolveFn: func(context.Context, string, string, string, string) error {
+		resolveCalled = true
+		return nil
+	}}
 	service, handler := queueNewHandler(t, store)
 	session := queueModeratorSession(t, service)
 	response := serveAppealHandler(handler, http.MethodPost, "/api/v1/appeals/appeal-1/resolve", `{"action":"delete","comment":"   "}`, session.AccessToken)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d; body: %s", response.Code, http.StatusBadRequest, response.Body.String())
 	}
+	if resolveCalled {
+		t.Fatal("resolve store was called for a whitespace-only delete comment")
+	}
 }
 
-func TestKnownBug_LongResolveComment(t *testing.T) {
-	// Bug: a valid but absurdly long comment is accepted by the store.
-	store := &moderatorAppealTestStore{resolveFn: func(context.Context, string, string, string, string) error { return nil }}
+func TestResolveAcceptsLongCommentWithinBodyLimit(t *testing.T) {
+	longComment := strings.Repeat("x", 15000)
+	gotComment := ""
+	store := &moderatorAppealTestStore{resolveFn: func(_ context.Context, _, _, _, comment string) error {
+		gotComment = comment
+		return nil
+	}}
 	service, handler := queueNewHandler(t, store)
 	session := queueModeratorSession(t, service)
-	body := `{"action":"delete","comment":"` + strings.Repeat("x", 15000) + `"}`
-	response := serveAppealHandler(handler, http.MethodPost, "/api/v1/appeals/appeal-1/resolve", body, session.AccessToken)
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d; body length: %d", response.Code, http.StatusBadRequest, response.Body.Len())
+	body, err := json.Marshal(map[string]string{"action": "delete", "comment": longComment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := serveAppealHandler(handler, http.MethodPost, "/api/v1/appeals/appeal-1/resolve", string(body), session.AccessToken)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d; body: %s", response.Code, http.StatusNoContent, response.Body.String())
+	}
+	if gotComment != longComment {
+		t.Fatalf("resolve store received comment length %d, want %d", len(gotComment), len(longComment))
 	}
 }
 
@@ -204,20 +221,21 @@ func TestAdversarialTicketIDs(t *testing.T) {
 
 func TestAdversarialRepeatOperations(t *testing.T) {
 	tests := []struct {
-		name  string
-		route moderatorRouteCase
-		set   func(*moderatorAppealTestStore, *bool)
+		name         string
+		route        moderatorRouteCase
+		secondStatus int
+		set          func(*moderatorAppealTestStore, *bool)
 	}{
-		{"claim", moderatorRouteCase{http.MethodPost, "/api/v1/appeals/appeal-1/claim", ""}, func(s *moderatorAppealTestStore, done *bool) {
+		{"claim", moderatorRouteCase{http.MethodPost, "/api/v1/appeals/appeal-1/claim", ""}, http.StatusConflict, func(s *moderatorAppealTestStore, done *bool) {
 			s.claimFn = func(context.Context, string, string) (appeals.Summary, error) {
 				if *done {
-					return appeals.Summary{}, appeals.ErrNotLockHolder
+					return appeals.Summary{}, appeals.ErrAlreadyClaimed
 				}
 				*done = true
 				return appeals.Summary{}, nil
 			}
 		}},
-		{"release", moderatorRouteCase{http.MethodPost, "/api/v1/appeals/appeal-1/release", ""}, func(s *moderatorAppealTestStore, done *bool) {
+		{"release", moderatorRouteCase{http.MethodPost, "/api/v1/appeals/appeal-1/release", ""}, http.StatusForbidden, func(s *moderatorAppealTestStore, done *bool) {
 			s.releaseFn = func(context.Context, string, string) error {
 				if *done {
 					return appeals.ErrNotLockHolder
@@ -226,7 +244,7 @@ func TestAdversarialRepeatOperations(t *testing.T) {
 				return nil
 			}
 		}},
-		{"resolve", moderatorRouteCase{http.MethodPost, "/api/v1/appeals/appeal-1/resolve", `{"action":"restore"}`}, func(s *moderatorAppealTestStore, done *bool) {
+		{"resolve", moderatorRouteCase{http.MethodPost, "/api/v1/appeals/appeal-1/resolve", `{"action":"restore"}`}, http.StatusForbidden, func(s *moderatorAppealTestStore, done *bool) {
 			s.resolveFn = func(context.Context, string, string, string, string) error {
 				if *done {
 					return appeals.ErrNotLockHolder
@@ -248,8 +266,8 @@ func TestAdversarialRepeatOperations(t *testing.T) {
 			if first.Code != http.StatusOK && first.Code != http.StatusNoContent {
 				t.Fatalf("first call status = %d; body: %s", first.Code, first.Body.String())
 			}
-			if second.Code != http.StatusForbidden {
-				t.Fatalf("second call status = %d, want 403; body: %s", second.Code, second.Body.String())
+			if second.Code != test.secondStatus {
+				t.Fatalf("second call status = %d, want %d; body: %s", second.Code, test.secondStatus, second.Body.String())
 			}
 		})
 	}
@@ -365,13 +383,26 @@ func TestKnownBug_CookieOverridesBearer(t *testing.T) {
 	service, handler := queueNewHandler(t, store)
 	moderator := queueModeratorSession(t, service)
 	student := queueStudentSession(t, service)
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/appeals", nil)
-	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: student.AccessToken})
-	request.Header.Set("Authorization", "Bearer "+moderator.AccessToken)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body: %s", response.Code, response.Body.String())
+	tests := []struct {
+		name       string
+		cookie     string
+		bearer     string
+		wantStatus int
+	}{
+		{"valid bearer takes precedence over student cookie", student.AccessToken, moderator.AccessToken, http.StatusOK},
+		{"student bearer takes precedence over moderator cookie", moderator.AccessToken, student.AccessToken, http.StatusForbidden},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/appeals", nil)
+			request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: test.cookie})
+			request.Header.Set("Authorization", "Bearer "+test.bearer)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body: %s", response.Code, test.wantStatus, response.Body.String())
+			}
+		})
 	}
 }
 

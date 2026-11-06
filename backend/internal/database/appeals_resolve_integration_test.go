@@ -450,7 +450,7 @@ func TestAppealPurgeDeletedReviewsAdditionalCasesIntegration(t *testing.T) {
 						t.Fatalf("set resolvedAt: %v", err)
 					}
 				}
-				badID, _ := seedModeratorTicket(t, store, ctx, appeals.StatusDeleted, "", cutoff.Add(-time.Hour))
+				badID, badReviewID := seedModeratorTicket(t, store, ctx, appeals.StatusDeleted, "", cutoff.Add(-time.Hour))
 				badObjectID, _ := primitive.ObjectIDFromHex(badID)
 				if _, err := store.appealCollection.UpdateOne(ctx, bson.M{"_id": badObjectID}, bson.M{"$set": bson.M{"reviewId": "invalid-review-id", "resolvedAt": cutoff.Add(-time.Hour)}}); err != nil {
 					t.Fatalf("set invalid review id: %v", err)
@@ -468,6 +468,14 @@ func TestAppealPurgeDeletedReviewsAdditionalCasesIntegration(t *testing.T) {
 					if err := store.feedbackCollection.FindOne(ctx, bson.M{"_id": reviewObjectID}).Err(); !errors.Is(err, mongo.ErrNoDocuments) {
 						t.Errorf("valid review %s lookup error = %v, want purged", validReviewIDs[i], err)
 					}
+				}
+				var malformedTicket bson.M
+				if err := store.appealCollection.FindOne(ctx, bson.M{"_id": badObjectID}).Decode(&malformedTicket); err != nil {
+					t.Errorf("malformed ticket lookup error = %v, want ticket retained", err)
+				}
+				badReviewObjectID, _ := primitive.ObjectIDFromHex(badReviewID)
+				if err := store.feedbackCollection.FindOne(ctx, bson.M{"_id": badReviewObjectID}).Err(); err != nil {
+					t.Errorf("malformed ticket's review lookup error = %v, want review retained", err)
 				}
 			}
 		})

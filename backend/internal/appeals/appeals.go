@@ -10,6 +10,7 @@ package appeals
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -55,6 +56,20 @@ var (
 	ErrCommentRequired = errors.New("a comment is required to delete a review")
 	ErrInvalidAction   = errors.New("action must be restore or delete")
 )
+
+func ValidateResolution(action, comment string) error {
+	if action != ActionRestore && action != ActionDelete {
+		return ErrInvalidAction
+	}
+	return ValidateResolutionComment(action, comment)
+}
+
+func ValidateResolutionComment(action, comment string) error {
+	if action == ActionDelete && strings.TrimSpace(comment) == "" {
+		return ErrCommentRequired
+	}
+	return nil
+}
 
 // Summary is the list shape used by the queue and the active-appeals page.
 // It is also what a successful claim returns.

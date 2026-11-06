@@ -70,8 +70,7 @@ func (s *Server) extendAppealLock(w http.ResponseWriter, r *http.Request) {
 // resolveAppeal handles POST /api/v1/appeals/{id}/resolve with
 // {"action": "restore" | "delete", "comment": "..."}. Decode it with
 // decodeRequestJSON. Responds 204 on success; 400 for appeals.ErrInvalidAction
-// or appeals.ErrCommentRequired (delete needs a non-empty comment); 403 for
-// appeals.ErrNotLockHolder.
+// or appeals.ErrCommentRequired; 403 for appeals.ErrNotLockHolder.
 func (s *Server) resolveAppeal(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Action  string `json:"action"`
@@ -84,6 +83,10 @@ func (s *Server) resolveAppeal(w http.ResponseWriter, r *http.Request) {
 	user, ok := userFromContext(r.Context())
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "authenticated user unavailable"})
+		return
+	}
+	if err := appeals.ValidateResolutionComment(input.Action, input.Comment); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	if err := s.appealStore.Resolve(r.Context(), r.PathValue("id"), user.ID, input.Action, input.Comment); err != nil {
