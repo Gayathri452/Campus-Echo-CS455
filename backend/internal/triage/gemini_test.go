@@ -1,10 +1,12 @@
 package triage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"strings"
@@ -66,6 +68,19 @@ func TestGeminiProviderUsesStructuredClassification(t *testing.T) {
 	if client.config.ResponseMIMEType != "application/json" || client.config.ResponseSchema == nil || client.config.ResponseSchema.Type != genai.TypeObject {
 		t.Fatalf("request did not configure a JSON object schema: %+v", client.config)
 	}
+	for _, expected := range []string{
+		"strongly negative opinions",
+		"explicit profanity",
+		"vulgar commentary",
+		"personal attacks",
+		"hate speech",
+		"quoted, reported, or discussed harmlessly",
+		"not automatically a violation",
+	} {
+		if !strings.Contains(client.config.SystemInstruction.Parts[0].Text, expected) {
+			t.Errorf("Gemini system instruction does not mention %q", expected)
+		}
+	}
 	minimalThinking := genai.ThinkingLevelMinimal
 	client = &fakeGeminiClient{response: geminiTextResponse(
 		`{"decision":"publish","reasonCode":"acceptable","explanation":"A negative opinion about the course."}`,
@@ -88,6 +103,10 @@ func TestGeminiProviderValidatesClassification(t *testing.T) {
 		{
 			name:     "valid flag",
 			response: `{"decision":"flag","reasonCode":"harassment","explanation":"Contains targeted harassment."}`,
+		},
+		{
+			name:     "valid profanity flag",
+			response: `{"decision":"flag","reasonCode":"profanity","explanation":"Uses explicit profanity as vulgar commentary."}`,
 		},
 		{
 			name:     "invalid decision",
@@ -130,6 +149,119 @@ func TestGeminiProviderValidatesClassification(t *testing.T) {
 				t.Fatalf("Classify() error = %v, wantErr %v", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestGeminiModerationLanguageCases(t *testing.T) {
+	tests := []struct {
+		name         string
+		review       string
+		response     string
+		wantDecision string
+		wantReason   string
+	}{
+		{
+			name:         "explicit profanity as vulgar commentary",
+			review:       "What the fuck is this course?!",
+			response:     `{"decision":"flag","reasonCode":"profanity","explanation":"Uses explicit profanity as vulgar commentary."}`,
+			wantDecision: DecisionFlag,
+			wantReason:   "profanity",
+		},
+		{
+			name:         "profane offensive opinion",
+			review:       "This course is fucking awful.",
+			response:     `{"decision":"flag","reasonCode":"profanity","explanation":"Uses profanity as vulgar commentary."}`,
+			wantDecision: DecisionFlag,
+			wantReason:   "profanity",
+		},
+		{
+			name:         "strong criticism without profanity",
+			review:       "This is the worst course I have taken.",
+			response:     `{"decision":"publish","reasonCode":"acceptable","explanation":"Strong criticism without abusive language."}`,
+			wantDecision: DecisionPublish,
+			wantReason:   "acceptable",
+		},
+		{
+			name:         "harmless quotation",
+			review:       `The instructor discussed the phrase "what the fuck" in a lecture on language.`,
+			response:     `{"decision":"publish","reasonCode":"acceptable","explanation":"Harmless quoted discussion of offensive language."}`,
+			wantDecision: DecisionPublish,
+			wantReason:   "acceptable",
+		},
+		{
+			name:         "educational reference",
+			review:       "The course analyzes profanity in historical texts.",
+			response:     `{"decision":"publish","reasonCode":"acceptable","explanation":"Educational reference, not abusive use."}`,
+			wantDecision: DecisionPublish,
+			wantReason:   "acceptable",
+		},
+		{
+			name:         "targeted personal attack",
+			review:       "The instructor is an idiot.",
+			response:     `{"decision":"flag","reasonCode":"personal_attack","explanation":"Contains a personal attack."}`,
+			wantDecision: DecisionFlag,
+			wantReason:   "personal_attack",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &fakeGeminiClient{response: geminiTextResponse(test.response)}
+			provider := newGeminiProviderWithClient(client, "test-model", time.Second)
+			result, err := provider.Classify(context.Background(), feedback.Feedback{Content: test.review})
+			if err != nil {
+				t.Fatalf("Classify() error = %v", err)
+			}
+			if result.Decision != test.wantDecision || result.ReasonCode != test.wantReason {
+				t.Fatalf("classification = %+v, want decision=%q reason=%q", result, test.wantDecision, test.wantReason)
+			}
+			if len(client.contents) != 1 || client.contents[0].Parts[0].Text != test.review {
+				t.Fatalf("Gemini request did not contain the test review: %+v", client.contents)
+			}
+		})
+	}
+}
+
+func TestGeminiProviderLogsValidatedDecisionWithoutReviewContent(t *testing.T) {
+	const reviewText = "private review text that must not appear in logs"
+	client := &fakeGeminiClient{response: geminiTextResponse(
+		`{"decision":"flag","reasonCode":"profanity","explanation":"Uses profanity as vulgar commentary."}`,
+	)}
+	provider := newGeminiProviderWithClient(client, "test-model", time.Second)
+	provider.apiKey = "synthetic-test-api-key"
+
+	originalOutput := log.Writer()
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(originalOutput)
+
+	result, err := provider.Classify(context.Background(), feedback.Feedback{Content: reviewText})
+	if err != nil {
+		t.Fatalf("Classify() error = %v", err)
+	}
+	if result.Decision != DecisionFlag || result.ReasonCode != "profanity" {
+		t.Fatalf("classification = %+v, want validated profanity flag", result)
+	}
+	logOutput := logs.String()
+	if !strings.Contains(logOutput, "decision=flag reason_code=profanity") {
+		t.Fatalf("validated decision was not logged: %q", logOutput)
+	}
+	if strings.Contains(logOutput, reviewText) || strings.Contains(logOutput, provider.apiKey) {
+		t.Fatalf("diagnostic log exposed sensitive input: %q", logOutput)
+	}
+}
+
+func TestFormatFlagReasonSupportsProfanity(t *testing.T) {
+	got, err := formatFlagReason(AIResult{
+		Decision:    DecisionFlag,
+		ReasonCode:  "profanity",
+		Explanation: "Uses explicit profanity as vulgar commentary.",
+	})
+	if err != nil {
+		t.Fatalf("formatFlagReason() error = %v", err)
+	}
+	if want := "profanity: Uses explicit profanity as vulgar commentary."; got != want {
+		t.Fatalf("formatFlagReason() = %q, want %q", got, want)
 	}
 }
 
@@ -456,6 +588,15 @@ func TestGeminiProviderSmoke(t *testing.T) {
 	}
 	if result.Decision != DecisionPublish || result.ReasonCode != "acceptable" {
 		t.Fatalf("ordinary negative feedback was not accepted: %+v", result)
+	}
+	result, err = provider.Classify(context.Background(), feedback.Feedback{
+		Content: "What the fuck is this course?!",
+	})
+	if err != nil {
+		t.Fatalf("Gemini profanity classification failed: %v", err)
+	}
+	if result.Decision != DecisionFlag || result.ReasonCode != "profanity" {
+		t.Fatalf("explicit profanity was not flagged: %+v", result)
 	}
 }
 

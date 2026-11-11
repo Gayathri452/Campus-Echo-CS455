@@ -755,7 +755,7 @@ func triageFailureCategory(err error) string {
 func formatFlagReason(result AIResult) (string, error) {
 	reasonCode := strings.ToLower(strings.TrimSpace(result.ReasonCode))
 	switch reasonCode {
-	case "abuse", "harassment", "hate_speech", "personal_attack", "other":
+	case "abuse", "profanity", "harassment", "hate_speech", "personal_attack", "other":
 	default:
 		return "", fmt.Errorf("%w: flagged result has no valid reason category", ErrInvalidDecision)
 	}
